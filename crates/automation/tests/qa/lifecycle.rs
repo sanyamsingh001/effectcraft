@@ -255,7 +255,7 @@ fn collect_files_keeps_existing_proxy_sources_and_destination_files() {
     }
     let source_bytes: Vec<_> = sources.iter().map(|p| std::fs::read(p).unwrap()).collect();
     assert_ne!(source_bytes[0], source_bytes[1], "same basename, independent media bytes");
-    // Occupy both a likely renamed destination and the atomic writer's sibling temporary path.
+    // Occupy a likely renamed destination and the old writer's sibling temporary path.
     let sentinels = [
         (footage_dir.join("2_shared.png"), b"existing destination, keep these bytes".to_vec()),
         (footage_dir.join("3_2_shared.png.tmp"), b"existing temporary-path occupant, keep these bytes".to_vec()),

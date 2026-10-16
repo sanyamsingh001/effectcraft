@@ -405,9 +405,8 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
                 let mut k = 2;
                 let dst = loop {
                     let dst = format!("{folder}/(Footage)/{name}");
-                    let tmp = crate::config::temp_path(std::path::Path::new(&dst));
-                    // Skip existing destinations and the atomic writer's temporary path.
-                    if used_names.insert(name.clone()) && !occupied(&dst) && !occupied(&tmp.to_string_lossy()) {
+                    // Skip existing destinations; the atomic writer creates its own exclusive temporary file.
+                    if used_names.insert(name.clone()) && !occupied(&dst) {
                         break dst;
                     }
                     name = format!("{k}_{name}");
