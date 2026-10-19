@@ -2,7 +2,7 @@
 //! (scale and move them in time and value), key-time snapping, and Alt-drag of a key group's
 //! first or last key in the timeline to scale the group in time. Edits are `keys.transform`.
 
-use effectcraft_engine::project::Comp;
+use effectcraft_engine::project::{Comp, LayerId};
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -39,15 +39,15 @@ fn box_id() -> egui::Id {
 }
 
 /// Bounds of the selected keys: (t0, v0, t1, v1).
-fn bounds(keys: &[SelKey]) -> Option<[f64; 4]> {
-    if keys.len() < 2 {
+fn bounds(keys: &[SelKey], dragging: bool) -> Option<[f64; 4]> {
+    if keys.is_empty() || !dragging && keys.len() < 2 {
         return None;
     }
     let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
     for k in keys {
         b = [b[0].min(k.t), b[1].min(k.v), b[2].max(k.t), b[3].max(k.v)];
     }
-    (b[2] > b[0] || b[3] > b[1]).then_some(b)
+    (dragging || b[2] > b[0] || b[3] > b[1]).then_some(b)
 }
 
 fn handle_points(r: Rect) -> [Pos2; 8] {
@@ -75,11 +75,13 @@ pub(crate) fn transform_box(
     if !app.ui.timeline.graph_transform_box {
         return;
     }
-    let Some(b) = bounds(keys) else { return };
+    let ctx = ui.ctx().clone();
+    // Keep the active handles registered when frame snapping collapses the selected keys.
+    let dragging = ctx.data(|d| d.get_temp::<BoxDrag>(box_id())).is_some();
+    let Some(b) = bounds(keys, dragging) else { return };
     let r = Rect::from_min_max(pos2(tm.x(b[0]), ymap(b[3])), pos2(tm.x(b[2]), ymap(b[1]))).expand(6.0);
     let value_ok = !speed && keys.iter().all(|k| k.editable);
     let col = Color32::from_rgb(0xd8, 0xd8, 0xd8);
-    let ctx = ui.ctx().clone();
     let drag_id = egui::Id::new("graph-dragging");
     let hp = handle_points(r);
     let data = |q: Pos2| [tm.t(q.x), vmap(q.y)];
@@ -246,6 +248,7 @@ mod snap_tests {
 
 #[derive(Clone, Copy, Debug)]
 struct AltScale {
+    owner: LayerId,
     /// The fixed end of the group (comp s).
     anchor: f64,
     /// The dragged end is the group's last key (else its first).
@@ -271,12 +274,12 @@ fn sel_range(app: &EffectcraftApp, comp: &Comp) -> Option<(f64, f64)> {
 
 /// Alt-drag on the first or last key of a selected group starts scaling the group in time
 /// about the other end. Returns true when it took the drag.
-pub(crate) fn alt_scale_begin(app: &EffectcraftApp, ctx: &egui::Context, comp: &Comp, key_ct: f64) -> bool {
+pub(crate) fn alt_scale_begin(app: &EffectcraftApp, ctx: &egui::Context, comp: &Comp, owner: LayerId, key_ct: f64) -> bool {
     let Some((lo, hi)) = sel_range(app, comp) else { return false };
     let st = if (key_ct - hi).abs() < 1e-6 {
-        AltScale { anchor: lo, end_is_max: true, span: None }
+        AltScale { owner, anchor: lo, end_is_max: true, span: None }
     } else if (key_ct - lo).abs() < 1e-6 {
-        AltScale { anchor: hi, end_is_max: false, span: None }
+        AltScale { owner, anchor: hi, end_is_max: false, span: None }
     } else {
         return false;
     };
@@ -287,24 +290,28 @@ pub(crate) fn alt_scale_begin(app: &EffectcraftApp, ctx: &egui::Context, comp: &
 /// While an Alt-drag scale is active: scale the group so its dragged end follows the pointer.
 pub(crate) fn alt_scale_update(app: &EffectcraftApp, ctx: &egui::Context, comp: &Comp, tm: TMap, actions: &mut Actions) {
     let Some(st) = ctx.data(|d| d.get_temp::<AltScale>(alt_id())) else { return };
-    if !ctx.input(|i| i.pointer.primary_down()) {
+    let (down, released) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_released()));
+    let owner_editable = comp.layer(st.owner).is_some_and(|layer| !layer.switches.locked);
+    if owner_editable
+        && (down || released)
+        && let (Some((lo, hi)), Some(px)) = (sel_range(app, comp), ctx.input(|i| i.pointer.latest_pos()))
+    {
+        let fr = comp.frame_rate;
+        let target = fr.snap_nearest(effectcraft_engine::time::Tick::from_seconds_f64(tm.t(px.x).max(0.0))).seconds();
+        // The group's span when the drag started: every step sends the whole scale since then.
+        let span = st.span.unwrap_or((if st.end_is_max { hi } else { lo }) - st.anchor);
+        if st.span.is_none() {
+            ctx.data_mut(|d| d.insert_temp(alt_id(), AltScale { span: Some(span), ..st }));
+        }
+        let want = target - st.anchor;
+        if span.abs() >= 1e-9 && want.abs() >= 1e-9 && want.signum() == span.signum() {
+            actions.push(("keys.transform".into(), json!({"timeScale": want / span, "timeAnchor": st.anchor, "merge": "key-alt-scale", "fromStart": true})));
+        }
+    }
+    if !down || !owner_editable {
         ctx.data_mut(|d| d.remove::<AltScale>(alt_id()));
         actions.push(("__endMerge".into(), json!({})));
-        return;
     }
-    let (Some((lo, hi)), Some(px)) = (sel_range(app, comp), ctx.input(|i| i.pointer.latest_pos())) else { return };
-    let fr = comp.frame_rate;
-    let target = fr.snap_nearest(effectcraft_engine::time::Tick::from_seconds_f64(tm.t(px.x).max(0.0))).seconds();
-    // The group's span when the drag started: every step sends the whole scale since then.
-    let span = st.span.unwrap_or((if st.end_is_max { hi } else { lo }) - st.anchor);
-    if st.span.is_none() {
-        ctx.data_mut(|d| d.insert_temp(alt_id(), AltScale { span: Some(span), ..st }));
-    }
-    let want = target - st.anchor;
-    if span.abs() < 1e-9 || want.abs() < 1e-9 || want.signum() != span.signum() {
-        return;
-    }
-    actions.push(("keys.transform".into(), json!({"timeScale": want / span, "timeAnchor": st.anchor, "merge": "key-alt-scale", "fromStart": true})));
 }
 
 /// An Alt-drag group scale is in progress (the plain key move stands aside).

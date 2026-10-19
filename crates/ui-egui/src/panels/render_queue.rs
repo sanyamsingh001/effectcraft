@@ -697,12 +697,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let olabels: Vec<String> = omenu.iter().map(|(l, _)| l.clone()).collect();
             if let Some(i) = widgets::popup_menu(ui, oid, odd.left_bottom(), &olabels, None) {
                 if omenu[i].1.get("choose").is_some() {
-                    // The web has no folders to choose from: its save "dialog" only names the file.
-                    let picked = pick_output(app, it).or_else(|| {
-                        let default = app.session.resolve_output(it).unwrap_or_default();
-                        let name = std::path::Path::new(&default).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                        app.hooks.pick_save.as_ref().map(|f| f(&name))
-                    });
+                    let picked = pick_output(app, it);
                     match picked {
                         Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
                         Some(None) => {}

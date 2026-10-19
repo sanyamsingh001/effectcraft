@@ -42,6 +42,10 @@ pub struct EgControl {
     /// [`ControlType::Scale`] slider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_type: Option<ControlType>,
+    /// Proportional component editing for newly exposed Transform Scale controls.
+    /// Absent on existing controls and explicit uniform Scale sliders.
+    #[serde(default, rename = "scaleLinked", skip_serializing_if = "Option::is_none")]
+    pub scale_linked: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

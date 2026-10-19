@@ -139,6 +139,9 @@ impl Session {
 
     /// Write settings to the config store.
     pub fn save_prefs(&self) {
+        if self.defer_prefs_write {
+            return;
+        }
         if let Some(c) = &self.config
             && let Err(e) = c.write(PREFS_FILE, &self.prefs.to_json())
         {

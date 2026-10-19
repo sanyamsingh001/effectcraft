@@ -6,7 +6,7 @@ use effectcraft_project::{LayerId, Property, Uid};
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::prop::prop_ref;
+use super::prop::{KeyTimeBase, key_time, key_timing, prop_ref};
 use super::{CommandSpec, bad, comp_id, f_p, has_comp, has_keys, layers_p, merge_p, str_p, time_p};
 use crate::{EngineError, KeyClip, KeyRef, Result, Session, cmd, query};
 
@@ -127,8 +127,17 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 sel.push(KeyRef { layer: *lid, prop: *uid, time: lt });
             }
+            let before: Vec<Tick> = pr.keys.iter().map(|key| key.time).collect();
             retime_roving(&mut pr.keys, pr.spatial);
+            // Retiming also moves keys pasted by an earlier clip into this same property.
+            for selected in sel.iter_mut().filter(|key| key.layer == *lid && key.prop == *uid) {
+                if let Some(key) = before.binary_search(&selected.time).ok().and_then(|i| pr.keys.get(i)) {
+                    selected.time = key.time;
+                }
+            }
         }
+        let mut seen = std::collections::HashSet::new();
+        sel.retain(|key| seen.insert(*key));
         st.selected_keys = sel;
         Ok(json!(st.selected_keys.len()))
     })
@@ -206,102 +215,132 @@ fn nudge(s: &mut Session, p: &Value) -> Result<Value> {
 /// Edit one key directly: move it in time and/or set its value (Graph Editor drags).
 fn set_key(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = prop_ref(s, p, "keys.set")?;
-    let t = Tick::from_seconds_f64(f_p(p, "time").ok_or_else(|| bad("keys.set", "missing `time` (layer time of the key)"))?);
-    let new_t = f_p(p, "newTime").map(Tick::from_seconds_f64);
+    let base = KeyTimeBase::from_params(p, "keys.set")?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
+    let t = key_time(layer, comp.frame_rate, p, "time", base, "keys.set", false)?.ok_or_else(|| bad("keys.set", "missing `time` (layer time by default)"))?;
+    let new_t = key_time(layer, comp.frame_rate, p, "newTime", base, "keys.set", true)?;
     let value = p.get("value").cloned();
-    let fr = s.project.comp(cid).map(|c| c.frame_rate);
-    s.edit("Edit Keyframe", merge_p(p), |proj, st| {
+    let nt = s.edit("Edit Keyframe", merge_p(p), |proj, st| {
         let l = super::layer_mut(proj, cid, lid)?;
         let pr = l.props.find_mut(uid).ok_or_else(|| bad("keys.set", "no property"))?;
         let i = nearest_key(&pr.keys, t).ok_or_else(|| bad("keys.set", "the property has no keyframes"))?;
         let old_t = pr.keys[i].time;
+        // Roving retimes other keys too; their stable indices map every existing selection.
+        let mut before = std::collections::HashMap::new();
+        for (index, key) in pr.keys.iter().enumerate() {
+            before.entry(key.time).or_insert(index);
+        }
         if let Some(v) = &value {
             let nv = pr.keys[i].value.coerce_json(v).ok_or_else(|| bad("keys.set", format!("can't use {v} here")))?;
             pr.keys[i].value = nv;
         }
         let mut nt = old_t;
         if let Some(n) = new_t {
-            nt = fr.map(|r| r.snap_nearest(n)).unwrap_or(n);
+            nt = n;
             // Keys can't pass their neighbours or share a time.
-            let lo = if i > 0 { pr.keys[i - 1].time.0 + 1 } else { i64::MIN };
-            let hi = if i + 1 < pr.keys.len() { pr.keys[i + 1].time.0 - 1 } else { i64::MAX };
+            let lo = if i > 0 { pr.keys[i - 1].time.0.saturating_add(1) } else { i64::MIN };
+            let hi = if i + 1 < pr.keys.len() { pr.keys[i + 1].time.0.saturating_sub(1) } else { i64::MAX };
             nt = Tick(nt.0.clamp(lo, hi));
             pr.keys[i].time = nt;
         }
         retime_roving(&mut pr.keys, pr.spatial);
         let nt = pr.keys.get(i).map(|k| k.time).unwrap_or(nt);
-        for k in st.selected_keys.iter_mut().filter(|k| k.layer == lid && k.prop == uid && k.time == old_t) {
-            k.time = nt;
-        }
-        Ok(json!({"time": nt.seconds()}))
-    })
+        let mut seen = std::collections::HashSet::new();
+        st.selected_keys.retain_mut(|key| {
+            if key.layer != lid || key.prop != uid {
+                return true;
+            }
+            let Some(&index) = before.get(&key.time) else { return false };
+            let Some(retimed) = pr.keys.get(index) else { return false };
+            key.time = retimed.time;
+            seen.insert(*key)
+        });
+        Ok(nt)
+    })?;
+    let layer = s.project.comp(cid).and_then(|c| c.layer(lid)).ok_or(EngineError::NoComp)?;
+    Ok(key_timing(layer, nt))
 }
 
 fn nearest_key(keys: &[Keyframe], t: Tick) -> Option<usize> {
     if let Some(i) = key_at(keys, t) {
         return Some(i);
     }
-    keys.iter().enumerate().min_by_key(|(_, k)| (k.time.0 - t.0).abs()).map(|(i, _)| i)
+    keys.iter().enumerate().min_by_key(|(_, k)| k.time.0.abs_diff(t.0)).map(|(i, _)| i)
 }
 
-/// Set one side's temporal ease of a key (Graph Editor handle drags, scripting).
+/// Set temporal ease for one key or a group of Graph Editor handles in one undo step.
 fn set_ease(s: &mut Session, p: &Value) -> Result<Value> {
-    let (cid, lid, uid) = prop_ref(s, p, "keys.setEase")?;
-    let t = Tick::from_seconds_f64(f_p(p, "time").ok_or_else(|| bad("keys.setEase", "missing `time`"))?);
-    let out = match str_p(p, "side") {
-        Some("in") => false,
-        Some("out") => true,
-        _ => return Err(bad("keys.setEase", "`side` must be in or out")),
+    let inputs: Vec<&Value> = match p.get("keys") {
+        Some(Value::Array(keys)) if !keys.is_empty() && keys.len() <= 100_000 => keys.iter().collect(),
+        Some(_) => return Err(bad("keys.setEase", "`keys` must contain 1 to 100000 handle targets")),
+        None => vec![p],
     };
-    let dim = p.get("dim").and_then(Value::as_u64).map(|d| d as usize);
-    let speed = f_p(p, "speed");
-    let influence = f_p(p, "influence").map(|v| (v / 100.0).clamp(0.001, 1.0));
-    s.edit("Keyframe Velocity", merge_p(p), |proj, _| {
-        let l = super::layer_mut(proj, cid, lid)?;
-        let pr = l.props.find_mut(uid).ok_or_else(|| bad("keys.setEase", "no property"))?;
-        let i = nearest_key(&pr.keys, t).ok_or_else(|| bad("keys.setEase", "no keyframes"))?;
-        let spatial = pr.spatial;
-        let n = if spatial && matches!(pr.keys[i].value, effectcraft_keyframe::Value::Vec2(_) | effectcraft_keyframe::Value::Vec3(_)) {
-            1
-        } else {
-            pr.keys[i].value.dims().max(1)
+    let mut targets = Vec::with_capacity(inputs.len());
+    for target in inputs {
+        let (cid, lid, uid) = prop_ref(s, target, "keys.setEase")?;
+        let t = Tick::from_seconds_f64(f_p(target, "time").ok_or_else(|| bad("keys.setEase", "missing `time`"))?);
+        let out = match str_p(target, "side") {
+            Some("in") => false,
+            Some("out") => true,
+            _ => return Err(bad("keys.setEase", "`side` must be in or out")),
         };
-        // Start from what the side presents now so untouched dimensions keep their shape.
-        let cur: Vec<Ease> = (0..n).map(|d| side_ease(&pr.keys, i, d, spatial, out).unwrap_or_default()).collect();
-        let k = &mut pr.keys[i];
-        let list = if out { &mut k.out_ease } else { &mut k.in_ease };
-        if list.len() != n {
-            *list = cur.clone();
-        }
-        for (d, e) in list.iter_mut().enumerate() {
-            if dim.is_some_and(|x| x != d) && n > 1 {
+        let dim = target.get("dim").and_then(Value::as_u64).map(|d| d as usize);
+        let speed = f_p(target, "speed");
+        let influence = f_p(target, "influence").map(|v| (v / 100.0).clamp(0.001, 1.0));
+        targets.push((cid, lid, uid, t, out, dim, speed, influence));
+    }
+    s.edit("Keyframe Velocity", merge_p(p), |proj, _| {
+        for (cid, lid, uid, t, out, dim, speed, influence) in targets {
+            let l = super::layer_mut(proj, cid, lid)?;
+            if l.switches.locked {
                 continue;
             }
-            if let Some(v) = speed {
-                e.speed = v;
+            let pr = l.props.find_mut(uid).ok_or_else(|| bad("keys.setEase", "no property"))?;
+            let i = nearest_key(&pr.keys, t).ok_or_else(|| bad("keys.setEase", "no keyframes"))?;
+            let spatial = pr.spatial;
+            let n = if spatial && matches!(pr.keys[i].value, effectcraft_keyframe::Value::Vec2(_) | effectcraft_keyframe::Value::Vec3(_)) {
+                1
+            } else {
+                pr.keys[i].value.dims().max(1)
+            };
+            // Start from what the side presents now so untouched dimensions keep their shape.
+            let cur: Vec<Ease> = (0..n).map(|d| side_ease(&pr.keys, i, d, spatial, out).unwrap_or_default()).collect();
+            let k = &mut pr.keys[i];
+            let list = if out { &mut k.out_ease } else { &mut k.in_ease };
+            if list.len() != n {
+                *list = cur.clone();
             }
-            if let Some(v) = influence {
-                e.influence = v;
+            for (d, e) in list.iter_mut().enumerate() {
+                if dim.is_some_and(|x| x != d) && n > 1 {
+                    continue;
+                }
+                if let Some(v) = speed {
+                    e.speed = v;
+                }
+                if let Some(v) = influence {
+                    e.influence = v;
+                }
             }
-        }
-        if out {
-            k.out_interp = Interp::Bezier;
-        } else {
-            k.in_interp = Interp::Bezier;
-        }
-        k.auto_bezier = false;
-        // Continuous Bezier keys keep matching speeds on both sides.
-        if k.continuous {
-            let src = if out { k.out_ease.clone() } else { k.in_ease.clone() };
-            let other = if out { &mut k.in_ease } else { &mut k.out_ease };
-            if other.len() != src.len() {
-                *other = src.clone();
+            if out {
+                k.out_interp = Interp::Bezier;
+            } else {
+                k.in_interp = Interp::Bezier;
             }
-            for (o, sv) in other.iter_mut().zip(&src) {
-                o.speed = sv.speed;
+            k.auto_bezier = false;
+            // Continuous Bezier keys keep matching speeds on both sides.
+            if k.continuous {
+                let src = if out { k.out_ease.clone() } else { k.in_ease.clone() };
+                let other = if out { &mut k.in_ease } else { &mut k.out_ease };
+                if other.len() != src.len() {
+                    *other = src.clone();
+                }
+                for (o, sv) in other.iter_mut().zip(&src) {
+                    o.speed = sv.speed;
+                }
+                k.in_interp = Interp::Bezier;
+                k.out_interp = Interp::Bezier;
             }
-            k.in_interp = Interp::Bezier;
-            k.out_interp = Interp::Bezier;
         }
         Ok(Value::Null)
     })
@@ -449,7 +488,15 @@ pub fn specs() -> Vec<CommandSpec> {
             s,
             &json!({"frames": -10})
         )),
-        cmd!("keys.set", "Edit Keyframe", [], None, "{layer?, path|prop, time (layer s), newTime?, value?, merge?}", has_comp, set_key),
+        cmd!(
+            "keys.set",
+            "Edit Keyframe",
+            [],
+            None,
+            "{layer?, path|prop, time (layer s by default), newTime? (same base), timeBase?: layer|comp, value?, merge?}",
+            has_comp,
+            set_key
+        ),
         cmd!("keys.selectEqual", "Select Equal Keyframes", [], None, "{}", has_keys, |s, _| select_related(s, "equal")),
         cmd!("keys.selectPrevious", "Select Previous Keyframes", [], None, "{}", has_keys, |s, _| select_related(s, "previous")),
         cmd!("keys.selectFollowing", "Select Following Keyframes", [], None, "{}", has_keys, |s, _| select_related(s, "following")),
@@ -458,7 +505,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Keyframe Ease",
             [],
             None,
-            "{layer?, path|prop, time (layer s), side: in|out, dim?, speed?, influence? %, merge?}",
+            "{keys?: [{layer?, path|prop, time, side, dim?, speed?, influence?}], layer?, path|prop, time (layer s), side: in|out, dim?, speed?, influence? %, merge?}",
             has_comp,
             set_ease
         ),

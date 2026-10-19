@@ -383,6 +383,8 @@ pub struct Session {
     pub prefs: prefs::Prefs,
     /// Bumped whenever settings change (frontends re-apply theme, labels…).
     pub prefs_revision: u64,
+    /// Defer persistent preference writes while a caller owns a transaction.
+    pub defer_prefs_write: bool,
     /// Where settings, shortcut presets and the crash-recovery sentinel are stored (`None` =
     /// nothing persists).
     pub config: Option<Arc<dyn config::ConfigStore>>,
@@ -441,6 +443,9 @@ pub struct Session {
     /// event loop (the desktop app) turn this on; headless sessions run `footage.check` when
     /// they want it.
     pub check_footage_on_open: bool,
+    /// Runtime source-refresh identity: newer checks, reloads and replacements supersede
+    /// pending footage checks even when their metadata is identical. Interpretation is separate.
+    pub footage_refresh: std::collections::BTreeMap<ItemId, u64>,
 }
 
 /// A thumbnail render ([`Session::thumbnail_job`]): (width, height, RGBA8).
@@ -501,6 +506,7 @@ impl Default for Session {
             disk_cache: None,
             prefs: prefs::Prefs::default(),
             prefs_revision: 0,
+            defer_prefs_write: false,
             config: None,
             keymaps: shortcuts::Keymaps::default(),
             ease_presets: vec![],
@@ -526,6 +532,7 @@ impl Default for Session {
             next_task_id: 1,
             learn: None,
             check_footage_on_open: false,
+            footage_refresh: Default::default(),
         }
     }
 }
@@ -637,6 +644,8 @@ impl Session {
         let cur = std::mem::replace(&mut self.project, p);
         self.history.redo.push((label, cur));
         self.history.merge_key = None;
+        let levels = self.prefs.general.undo_levels.max(1) as usize;
+        self.history.trim(levels, &self.project);
         self.sanitize_state();
         self.bump();
         true
@@ -647,6 +656,8 @@ impl Session {
         let cur = std::mem::replace(&mut self.project, p);
         self.history.undo.push((label, cur));
         self.history.merge_key = None;
+        let levels = self.prefs.general.undo_levels.max(1) as usize;
+        self.history.trim(levels, &self.project);
         self.sanitize_state();
         self.bump();
         true
@@ -659,12 +670,25 @@ impl Session {
         if self.state.active_comp.is_some_and(|c| p.comp(c).is_none()) {
             self.state.active_comp = self.state.open_comps.first().copied();
         }
-        if let Some(c) = self.active_comp() {
-            let ids: Vec<LayerId> = c.layers.iter().map(|l| l.id).collect();
-            self.state.selected_layers.retain(|l| ids.contains(l));
-            self.state.selected_props.retain(|(l, _)| ids.contains(l));
-            self.state.selected_keys.retain(|k| ids.contains(&k.layer));
-            self.state.selected_vertices.retain(|v| ids.contains(&v.layer));
+        if let Some(c) = self.state.active_comp.and_then(|id| p.comp(id)) {
+            self.state.selected_layers.retain(|id| c.layer(*id).is_some());
+            self.state.selected_props.retain(|(id, uid)| c.layer(*id).is_some_and(|l| l.props.find(*uid).is_some() || l.props.find_group(*uid).is_some()));
+            self.state.selected_keys.retain(|k| {
+                c.layer(k.layer).and_then(|l| l.props.find(k.prop)).is_some_and(|pr| pr.keys.binary_search_by_key(&k.time, |key| key.time).is_ok())
+            });
+            let time = self.state.active_comp.and_then(|id| self.state.times.get(&id)).copied().unwrap_or(Tick::ZERO);
+            self.state.selected_vertices.retain(|v| {
+                c.layer(v.layer).is_some_and(|l| {
+                    l.props.find_group(v.mask).and_then(|g| g.get("path")).is_some_and(
+                        |pr| matches!(pr.value_at(l.layer_time(time)), effectcraft_keyframe::Value::Path(path) if path.vertices.get(v.index).is_some()),
+                    )
+                })
+            });
+        } else {
+            self.state.selected_layers.clear();
+            self.state.selected_props.clear();
+            self.state.selected_keys.clear();
+            self.state.selected_vertices.clear();
         }
         if let Some((l, t)) = self.state.current_track
             && self.active_comp().and_then(|c| c.layer(l)).and_then(|l| l.tracker(t)).is_none()
@@ -914,6 +938,7 @@ impl Session {
         self.roto_job = None;
         self.roto_pending.clear();
         self.drop_tasks();
+        self.footage_refresh.clear();
         p.fix_next_id();
         upgrade_effects(&mut p);
         self.project = Arc::new(p);
@@ -967,11 +992,17 @@ mod tests_3d;
 #[cfg(test)]
 mod tests_anim_tools;
 #[cfg(test)]
+mod tests_atomic_properties;
+#[cfg(test)]
+mod tests_batch_save_atomic;
+#[cfg(test)]
 mod tests_camera_track;
 #[cfg(test)]
 mod tests_codec_options;
 #[cfg(test)]
 mod tests_color_view;
+#[cfg(test)]
+mod tests_conform_frames;
 #[cfg(test)]
 mod tests_disk_cache;
 #[cfg(test)]
@@ -983,11 +1014,19 @@ mod tests_essential;
 #[cfg(test)]
 mod tests_essential_more;
 #[cfg(test)]
+mod tests_essential_scale;
+#[cfg(test)]
 mod tests_face;
 #[cfg(test)]
 mod tests_fidelity;
 #[cfg(test)]
 mod tests_frame_export;
+#[cfg(test)]
+mod tests_key_edit_order;
+#[cfg(test)]
+mod tests_key_selection;
+#[cfg(test)]
+mod tests_key_time;
 #[cfg(test)]
 mod tests_keylight;
 #[cfg(test)]
@@ -1007,13 +1046,19 @@ mod tests_model3d;
 #[cfg(test)]
 mod tests_motion_blur_depth;
 #[cfg(test)]
+mod tests_paste_layer_selection;
+#[cfg(test)]
 mod tests_project_items;
 #[cfg(test)]
 mod tests_proxy;
 #[cfg(test)]
 mod tests_rig3d;
 #[cfg(test)]
+mod tests_selection_sanitize;
+#[cfg(test)]
 mod tests_settings;
+#[cfg(test)]
+mod tests_spatial_tangent_selection;
 #[cfg(test)]
 mod tests_stubs;
 #[cfg(test)]
@@ -1132,3 +1177,9 @@ mod tests_paint;
 mod tests_panels;
 #[cfg(test)]
 mod tests_roto;
+
+#[cfg(test)]
+mod tests_layer_skew;
+
+#[cfg(test)]
+mod tests_project_identifiers;

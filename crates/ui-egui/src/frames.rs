@@ -138,6 +138,10 @@ impl Cache {
         }
         self.evict_gpu();
     }
+    fn fits_gpu(&self, bytes: usize) -> bool {
+        bytes <= self.gpu_budget.min(self.budget)
+    }
+
     /// Video memory: drop the oldest GPU frames past their own budget.
     fn evict_gpu(&mut self) {
         while self.gpu_bytes > self.gpu_budget {
@@ -196,11 +200,9 @@ pub struct RenderSource {
     pub layer_cache: Arc<LayerCache>,
     /// GPU compositor on the viewer's device (Mercury GPU Acceleration), if available.
     pub gpu: Option<Gpu>,
-    /// Keep GPU frames on the GPU for the viewer (native egui-wgpu textures). Off on the
-    /// desktop: Show Channel / exposure / region-of-interest drawing read the CPU frame texture,
-    /// so GPU frames are read back (the compositing still runs on the GPU). On in the browser
-    /// while the viewer draws plainly, because there frames can't be read back synchronously
-    /// (`EffectcraftApp::gpu_display`).
+    /// Keep GPU frames in native egui-wgpu textures while the viewer draws plainly. Native
+    /// disk-cache persistence keeps its CPU readback path. Display controls and samplers use
+    /// on-demand readback; the browser cannot read back synchronously (`EffectcraftApp::gpu_display`).
     pub gpu_display: bool,
     /// The persistent disk cache, when enabled.
     pub disk: Option<Arc<DiskCache>>,
@@ -291,6 +293,12 @@ pub fn opts_hash(o: &RenderOpts) -> u64 {
 fn frame_disk_key(keys: &ContentKeys, project: &Project, key: &FrameKey, opts_hash: u64) -> u128 {
     let content = content_key(keys, project, key.revision, key.comp);
     disk_cache::frame_key(content, key.frame, key.scale, key.view ^ opts_hash)
+}
+
+/// Final preview dimensions, including a positive region of interest and renderer rounding.
+pub(crate) fn preview_size(width: u32, height: u32, roi: Option<[f64; 4]>, scale: f64) -> [u32; 2] {
+    let size = roi.filter(|r| r[2] > 0.0 && r[3] > 0.0).map_or([f64::from(width), f64::from(height)], |r| [r[2], r[3]]);
+    size.map(|side| ((side * scale).round() as u32).max(1))
 }
 
 /// A frame for a [`RemoteFrames`] renderer.
@@ -635,6 +643,19 @@ impl Frames {
         self.cache.lock().map(|c| c.budget).unwrap_or(0)
     }
 
+    /// Preview frames that fit without evicting their start while Cache Before Playback waits.
+    /// GPU-eligible views also follow the texture budget, including memory-error backoff.
+    /// Returns zero when the RAM cache cannot retain even one frame.
+    pub fn preview_capacity(&self, width: u32, height: u32, scale: f64, gpu: bool) -> i64 {
+        let side = |n: u32| (n as f64 * scale).ceil().max(1.0);
+        let frame = side(width) * side(height) * 4.0;
+        let budget = self.cache.lock().map(|c| if gpu && c.fits_gpu(frame as usize) { c.budget.min(c.gpu_budget) } else { c.budget }).unwrap_or(0);
+        if frame > budget as f64 {
+            return 0;
+        }
+        ((budget as f64 * 0.9 / frame) as i64).max(1)
+    }
+
     pub fn clear(&self) {
         if let Some(r) = &self.remote {
             r.purge();
@@ -663,24 +684,33 @@ impl Frames {
     }
 
     fn request_with(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, urgent: bool) {
-        if self.is_cached(&key) {
+        let cached = self.is_cached(&key);
+        if cached && !urgent {
             return;
         }
         let Ok(mut q) = self.queue.lock() else { return };
-        // Jobs for an older project revision can never be shown: drop them.
-        let before = q.jobs.len();
-        q.jobs.retain(|j| j.key.revision >= key.revision);
-        let dropped = before - q.jobs.len();
-        if dropped > 0
-            && let Ok(mut inf) = self.inflight.lock()
-        {
-            inf.retain(|k| k.revision >= key.revision || q.running.contains(k));
-        }
-        if urgent {
-            // Only the newest viewer frame is urgent; earlier ones become prefetch.
-            for j in q.jobs.iter_mut() {
-                j.urgent = j.key == key;
+        // Drop old revisions and superseded scrub requests before they reach a worker.
+        // Explicit RAM-preview prefetch stays queued, including a frame promoted to urgent.
+        let dropped: HashSet<_> =
+            q.jobs.iter().filter(|j| j.key.revision < key.revision || (urgent && j.urgent && !j.prefetch && j.key != key)).map(|j| j.key).collect();
+        if !dropped.is_empty() {
+            q.jobs.retain(|j| !dropped.contains(&j.key));
+            if let Ok(mut inf) = self.inflight.lock() {
+                for dropped_key in dropped {
+                    inf.remove(&dropped_key);
+                }
             }
+        }
+        for j in &mut q.jobs {
+            if urgent {
+                j.urgent = j.key == key;
+            } else if j.key == key {
+                j.prefetch = true;
+            }
+        }
+        // Returning to a cached frame still removes work from the previous scrub position.
+        if cached {
+            return;
         }
         {
             let Ok(mut inf) = self.inflight.lock() else { return };
@@ -690,7 +720,7 @@ impl Frames {
         }
         q.seq += 1;
         let seq = q.seq;
-        q.jobs.push(Job { key, src: src.clone(), comp, t, opts, urgent, seq });
+        q.jobs.push(Job { key, src: src.clone(), comp, t, opts, urgent, prefetch: !urgent, seq });
         drop(q);
         #[cfg(not(target_arch = "wasm32"))]
         if self.remote.is_none() {
@@ -961,11 +991,31 @@ impl Worker {
         r.accel = Some(g as &dyn effectcraft_engine::render::Accelerator);
         r.active_accel()?;
         match g.within_memory(|| g.render_display(&r, job.comp, job.t)) {
-            Ok(f) => f.map(|f| FrameImage::Gpu(Arc::new(f))),
+            Ok(f) => f.and_then(|f| self.display_image(g, f)),
             Err(e) => {
                 self.gpu_attempt_failed(g, &e);
                 None
             }
+        }
+    }
+
+    /// A display texture larger than its current cache allowance would be evicted as soon as
+    /// it finished. Preserve the rendered pixels on the CPU instead; the browser's worker can
+    /// provide the CPU fallback when synchronous readback is unavailable.
+    fn display_image(&self, gpu: &Gpu, frame: DisplayFrame) -> Option<FrameImage> {
+        let bytes = (frame.width as usize).checked_mul(frame.height as usize)?.checked_mul(4)?;
+        if self.cache.lock().is_ok_and(|c| c.fits_gpu(bytes)) {
+            return Some(FrameImage::Gpu(Arc::new(frame)));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let rgba = gpu.read_display(&frame)?;
+            Some(FrameImage::Cpu(Arc::new(egui::ColorImage::from_rgba_premultiplied([frame.width as usize, frame.height as usize], &rgba))))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = gpu;
+            None
         }
     }
 
@@ -1001,7 +1051,7 @@ impl Worker {
                             }
                             p.record(key, true, t0.elapsed().as_secs_f64() * 1000.0);
                         }
-                        return FrameImage::Gpu(Arc::new(f));
+                        return self.display_image(g, f).unwrap_or_else(|| self.render_job(job, false));
                     }
                     Ok(None) => {
                         if let Some((p, key)) = auto {
@@ -1042,6 +1092,8 @@ struct Job {
     t: Tick,
     opts: RenderOpts,
     urgent: bool,
+    /// Requested for RAM preview as well as, possibly, the current viewer frame.
+    prefetch: bool,
     seq: u64,
 }
 
@@ -1296,5 +1348,94 @@ mod tests {
         assert_eq!(at(&s), o1, "a mute after a real edit keeps that edit's frames");
         switch(&mut s, inner, solid, "video", true);
         assert_ne!(at(&s), o1);
+    }
+
+    #[test]
+    fn preview_capacity_follows_texture_backoff_and_preserves_cpu_allowance() {
+        let f = Frames::default();
+        f.set_budget(3 << 30);
+        assert_eq!(f.preview_capacity(1024, 1024, 1.0, false), 691);
+        assert_eq!(f.preview_capacity(1024, 1024, 1.0, true), 230, "a 360-frame preview must fit its GPU cache before playback can start");
+        f.cache.lock().unwrap().gpu_out_of_memory();
+        assert_eq!(f.preview_capacity(1024, 1024, 1.0, true), 115, "planning follows the actual reduced texture budget");
+        assert_eq!(f.preview_capacity(1024, 1024, 1.0, false), 691, "CPU and disk-persisted views retain their RAM allowance");
+        for _ in 0..8 {
+            f.cache.lock().unwrap().gpu_out_of_memory();
+        }
+        assert_eq!(f.preview_capacity(1024, 1024, 1.0, true), 14);
+        f.set_budget(32 << 20);
+        assert_eq!(f.preview_capacity(1024, 1024, 1.0, true), 7, "RAM can still be the lower bound");
+        assert_eq!(f.preview_capacity(1024, 1024, 0.5, true), 28, "capacity follows rendered resolution");
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn display_frame_larger_than_texture_cache_falls_back_and_is_retained() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let gpu = match Gpu::try_headless() {
+            Ok(gpu) => gpu,
+            Err(reason) => {
+                assert!(std::env::var_os("EFFECTCRAFT_TEST_REQUIRE_GPU").is_none(), "GPU proving run needs an adapter: {reason}");
+                eprintln!("no GPU adapter: {reason}; skipped");
+                return;
+            }
+        };
+        eprintln!("proving adapter: {}", effectcraft_engine::render::Accelerator::name(&gpu));
+        struct QueueOnly;
+        impl RemoteFrames for QueueOnly {
+            fn slots(&self) -> usize {
+                0
+            }
+            fn start(&self, _: RemoteJob, _: RemoteDone) {
+                panic!("only direct local rendering is used");
+            }
+        }
+        let mut s = Session::default();
+        let comp = ItemId(s.execute("comp.new", json!({"width": 4, "height": 4, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 4, "height": 4})).unwrap();
+        let src = RenderSource {
+            project: s.project.clone(),
+            footage: s.footage.clone(),
+            expr: None,
+            layer_cache: Arc::default(),
+            gpu: Some(gpu.clone()),
+            gpu_display: true,
+            disk: None,
+        };
+        let frames = Frames { remote: Some(Arc::new(QueueOnly)), ..Default::default() };
+        {
+            let mut cache = frames.cache.lock().unwrap();
+            cache.budget = 256;
+            cache.gpu_budget = 32;
+        }
+        let worker = frames.worker();
+        let opts = RenderOpts { backend: effectcraft_engine::render::Backend::Gpu, ..Default::default() };
+        let key = FrameKey { revision: 1, content: 1, comp: comp.0, frame: 0, scale: 1000, view: 0, opts: 0 };
+        frames.request_urgent(&src, key, comp, Tick::ZERO, opts);
+        let job = frames.queue.lock().unwrap().jobs.pop().unwrap();
+        let image = worker.render_gpu(&job).expect("tiny display frame renders");
+        assert_eq!(image.size(), [4, 4]);
+        worker.finish(&job, image, web_time::Instant::now());
+        let cached = frames.get(&key).expect("finished frame must remain available when it exceeds only the GPU allowance");
+        assert!(!cached.is_gpu(), "pixels fall back to the larger RAM allowance");
+        let FrameImage::Cpu(cpu) = cached else { panic!("oversized GPU frame must fall back to the RAM cache") };
+        assert!(cpu.pixels.iter().all(|p| p.to_array() == [255, 0, 0, 255]));
+        assert_eq!(frames.cache.lock().unwrap().gpu_bytes, 0);
+        assert_eq!(frames.preview_capacity(4, 4, 1.0, true), 3, "planning follows RAM when a single texture cannot be retained");
+        assert_eq!(gpu.context().transfer_stats().readbacks, 1, "one actual tiny texture readback preserves the completed frame");
+        frames.cache.lock().unwrap().gpu_budget = 64;
+        let next = FrameKey { frame: 1, ..key };
+        frames.request_urgent(&src, next, comp, Tick::ZERO, opts);
+        let job = frames.queue.lock().unwrap().jobs.pop().unwrap();
+        let image = worker.render_gpu(&job).expect("a fitting texture renders");
+        assert!(image.is_gpu(), "an exact-fit texture stays on the GPU");
+        worker.finish(&job, image, web_time::Instant::now());
+        assert!(frames.get(&next).is_some_and(|image| image.is_gpu()));
+        assert_eq!(frames.cache.lock().unwrap().gpu_bytes, 64);
+        assert_eq!(gpu.context().transfer_stats().readbacks, 1, "a fitting frame needs no additional readback");
+        assert_eq!(frames.inflight(), 0);
+        let mut cache = frames.cache.lock().unwrap();
+        cache.budget = 32;
+        assert!(!cache.fits_gpu(64), "RAM remains an independent bound");
     }
 }

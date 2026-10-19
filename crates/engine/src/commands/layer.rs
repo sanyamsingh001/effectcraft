@@ -281,6 +281,11 @@ fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
                 &serde_json::json!({"comp": cid.0, "item": item.0, "time": f_p(p, "time"), "index": p.get("index"), "position": p.get("position")}),
             );
         }
+        ItemKind::Footage(f)
+            if f.kind == effectcraft_project::FootageKind::Sequence || (f.kind == effectcraft_project::FootageKind::Video && f.loop_count > 1) =>
+        {
+            (LayerSource::Footage { item }, (f.width, f.height), it.source_span().map(|(duration, _)| duration).or(Some(f.duration)))
+        }
         ItemKind::Footage(f) => (LayerSource::Footage { item }, (f.width, f.height), Some(f.duration)),
         ItemKind::Solid(so) => (LayerSource::Solid { item }, (so.width, so.height), None),
         ItemKind::Folder => return Err(bad("layer.addItem", "folders can't be layers")),
@@ -305,11 +310,13 @@ fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
 fn select(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let ids: Vec<LayerId> = match p.get("layers").or(p.get("layer")) {
+    let mut ids: Vec<LayerId> = match p.get("layers").or(p.get("layer")) {
         Some(Value::Array(a)) => a.iter().filter_map(|v| resolve_layer(comp, v)).collect(),
         Some(v) => resolve_layer(comp, v).into_iter().collect(),
         None => vec![],
     };
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(*id));
     let add = b_p(p, "add").unwrap_or(false);
     let toggle = b_p(p, "toggle").unwrap_or(false);
     if toggle {
@@ -542,7 +549,7 @@ fn track_matte(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-/// How a 2D layer's transform changes so it stays where it is when its parent changes.
+/// Re-express a layer in its new parent space without moving its anchor.
 pub(crate) struct ParentFix {
     pub layer: LayerId,
     /// Maps Position from the old parent's space into the new one's.
@@ -551,12 +558,69 @@ pub(crate) struct ParentFix {
     rotation: f64,
     /// Multiply Scale.
     scale: [f64; 2],
+    /// Exact static 2D pose for a representable relative skewed parent space.
+    pose_2d: Option<([f64; 2], f64, f64)>,
+    /// 3D AV layers retain their world-space anchor, including Z.
+    position_3d: Option<effectcraft_geom::Mat4>,
+    /// A uniform relative parent transform can preserve static Orientation and Scale.
+    pose_3d: Option<([f64; 3], f64)>,
 }
 
 impl ParentFix {
     /// Re-express the layer's Position, Rotation and Scale (every key) in the new parent's space.
     pub fn apply(&self, l: &mut Layer) {
         let Some(tr) = l.props.sub_mut("transform") else { return };
+        if let Some(m) = self.position_3d {
+            let map_position = |v: &KV| {
+                let q = m.apply(effectcraft_geom::Vec3::from(v.as_vec3()));
+                KV::Vec3([q.x, q.y, q.z])
+            };
+            // Read all separated axes before writing any of them.
+            let names = ["positionX", "positionY", "positionZ"];
+            if tr.get("positionX").is_some() {
+                let axes = names.map(|name| tr.get(name).cloned());
+                let current = axes.each_ref().map(|pr| pr.as_ref().map(|pr| pr.value.as_f64()).unwrap_or(0.0));
+                let q = m.apply(effectcraft_geom::Vec3::from(current));
+                for (i, name) in names.into_iter().enumerate() {
+                    if let Some(pr) = tr.get_mut(name) {
+                        pr.value = KV::Scalar([q.x, q.y, q.z].get(i).copied().unwrap_or(0.0));
+                        for key in &mut pr.keys {
+                            let p = axes.each_ref().map(|axis| axis.as_ref().map(|axis| axis.value_at(key.time).as_f64()).unwrap_or(0.0));
+                            let q = m.apply(effectcraft_geom::Vec3::from(p));
+                            key.value = KV::Scalar([q.x, q.y, q.z].get(i).copied().unwrap_or(0.0));
+                        }
+                    }
+                }
+            }
+            if let Some(pr) = tr.get_mut("position") {
+                pr.value = map_position(&pr.value);
+                for key in &mut pr.keys {
+                    key.value = map_position(&key.value);
+                    // Spatial tangents are vectors, so the parent's translation is excluded.
+                    for tangent in [&mut key.spatial_in, &mut key.spatial_out] {
+                        let v = m.apply_vec(effectcraft_geom::Vec3::from(*tangent));
+                        *tangent = [v.x, v.y, v.z];
+                    }
+                }
+            }
+            if let Some((orientation, factor)) = self.pose_3d {
+                if let Some(pr) = tr.get_mut("orientation") {
+                    pr.value = KV::Vec3(orientation);
+                }
+                if let Some(pr) = tr.get_mut("scale") {
+                    let scaled = |value: &KV| KV::Vec3(value.as_vec3().map(|v| v * factor));
+                    pr.value = scaled(&pr.value);
+                    for key in &mut pr.keys {
+                        key.value = scaled(&key.value);
+                        // Scale's temporal speeds use the same units as its values.
+                        for ease in key.in_ease.iter_mut().chain(&mut key.out_ease) {
+                            ease.speed *= factor;
+                        }
+                    }
+                }
+            }
+            return;
+        }
         let map = |pr: &mut effectcraft_project::Property, f: &dyn Fn(&KV) -> KV| {
             pr.value = f(&pr.value);
             for key in &mut pr.keys {
@@ -593,6 +657,21 @@ impl ParentFix {
                 KV::Vec3([q.x, q.y, c[2]])
             });
         }
+        if let Some((scale, rotation, skew)) = self.pose_2d {
+            if let Some(pr) = tr.get_mut("rotation") {
+                pr.value = KV::Scalar(rotation);
+            }
+            if let Some(pr) = tr.get_mut("scale") {
+                let z = pr.value.as_vec3()[2];
+                pr.value = KV::Vec3([scale[0], scale[1], z]);
+            }
+            for (name, value) in [("skew", skew), ("skewAxis", 0.0)] {
+                if let Some(pr) = tr.get_mut(name) {
+                    pr.value = KV::Scalar(value);
+                }
+            }
+            return;
+        }
         let (dr, k) = (self.rotation, self.scale);
         if let Some(pr) = tr.get_mut("rotation") {
             map(pr, &|v| KV::Scalar(v.as_f64() + dr));
@@ -606,7 +685,139 @@ impl ParentFix {
     }
 }
 
-/// Like the pick-whip, a parent change keeps 2D layers where they are: their transform is
+/// The optional skew compensation path never re-expresses authored animation or expressions.
+fn static_two_d_skew(layer: &Layer) -> Option<bool> {
+    if layer.is_3d() || layer.auto_orient != effectcraft_project::AutoOrient::Off {
+        return None;
+    }
+    let tr = layer.transform()?;
+    for name in ["anchor", "position", "scale", "rotation", "skew", "skewAxis"] {
+        let prop = tr.get(name)?;
+        if !prop.keys.is_empty() || prop.expr.is_some() {
+            return None;
+        }
+        let finite = match &prop.value {
+            KV::Scalar(v) => v.is_finite(),
+            KV::Vec3(v) => v.iter().all(|v| v.is_finite()),
+            _ => false,
+        };
+        if !finite {
+            return None;
+        }
+    }
+    for name in ["positionX", "positionY", "positionZ"] {
+        if let Some(prop) = tr.get(name)
+            && (!prop.keys.is_empty() || prop.expr.is_some() || !prop.value.as_f64().is_finite())
+        {
+            return None;
+        }
+    }
+    Some(tr.get("skew")?.value.as_f64().clamp(-85.0, 85.0) != 0.0)
+}
+
+/// QR of the complete authored child basis, in the renderer's R * Skew(-angle, 0) * S order.
+/// Reject bases outside the single-layer skew domain instead of clamping away their shape.
+fn static_skew_parent_fix(ectx: &effectcraft_render::EvalCtx<'_>, layer: &Layer, parent: Option<LayerId>) -> Option<ParentFix> {
+    use effectcraft_geom::{Mat3, vec2};
+    let child_skew = static_two_d_skew(layer)?;
+    let space = |mut id: Option<LayerId>| {
+        let mut m = Mat3::IDENTITY;
+        let mut skew = false;
+        // Match the renderer's bounded ancestor walk. local_matrix excludes source PAR.
+        for _ in 0..64 {
+            let Some(current) = id else { return Some((m, skew)) };
+            let ancestor = ectx.comp.layer(current)?;
+            skew |= static_two_d_skew(ancestor)?;
+            m = ectx.local_matrix(ancestor).plane_to_mat3() * m;
+            if !m.0.iter().flatten().all(|v| v.is_finite()) {
+                return None;
+            }
+            id = ancestor.parent;
+        }
+        id.is_none().then_some((m, skew))
+    };
+    let (old, old_skew) = space(layer.parent)?;
+    let (new, new_skew) = space(parent)?;
+    if !child_skew && !old_skew && !new_skew {
+        return None; // Preserve the historical zero-skew compensation exactly.
+    }
+    let relative = new.inverse()? * old;
+    let desired = relative * ectx.local_matrix(layer).plane_to_mat3();
+    if !relative.0.iter().chain(desired.0.iter()).flatten().all(|v| v.is_finite()) {
+        return None;
+    }
+    let a = desired.0;
+    let sx = a[0][0].hypot(a[1][0]);
+    if sx <= 0.0 || !sx.is_finite() {
+        return None;
+    }
+    let (ux, uy) = (a[0][0] / sx, a[1][0] / sx);
+    // Equivalent to det/sx, without overflowing the unnormalized determinant.
+    let sy = ux * a[1][1] - uy * a[0][1];
+    if sy == 0.0 || !sy.is_finite() {
+        return None;
+    }
+    let shear = (ux * a[0][1] + uy * a[1][1]) / sy;
+    let rotation = uy.atan2(ux).to_degrees();
+    let skew = -shear.atan().to_degrees();
+    let scale = [sx * 100.0, sy * 100.0];
+    if !shear.is_finite() || !scale.iter().all(|v| v.is_finite()) || skew.abs() > 85.0 {
+        return None;
+    }
+    let actual = (Mat3::rotate_deg(rotation) * Mat3::skew_deg(-skew, 0.0) * Mat3::scale(vec2(sx, sy))).0;
+    let magnitude = [a[0][0], a[0][1], a[1][0], a[1][1]].into_iter().map(f64::abs).fold(1.0, f64::max);
+    for row in 0..2 {
+        for col in 0..2 {
+            if !actual[row][col].is_finite() || (actual[row][col] - a[row][col]).abs() > 1e-10 * magnitude {
+                return None;
+            }
+        }
+    }
+    let tr = layer.transform()?;
+    let position = ectx.position(layer, tr);
+    let mapped = relative.apply(vec2(position[0], position[1]));
+    if !mapped.x.is_finite() || !mapped.y.is_finite() {
+        return None;
+    }
+    Some(ParentFix { layer: layer.id, m: relative, rotation: 0.0, scale: [1.0; 2], pose_2d: Some((scale, rotation, skew)), position_3d: None, pose_3d: None })
+}
+
+/// A uniform factor commutes with authored axis Rotation and Scale; prepend its orthogonal
+/// rotation to static Orientation using the existing Rz * Ry * Rx order.
+fn uniform_parent_pose(m: effectcraft_geom::Mat4, orientation: [f64; 3]) -> Option<([f64; 3], f64)> {
+    use effectcraft_geom::{Mat4, Vec3, vec3};
+    if !orientation.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let a = m.0;
+    let columns = [vec3(a[0][0], a[1][0], a[2][0]), vec3(a[0][1], a[1][1], a[2][1]), vec3(a[0][2], a[1][2], a[2][2])];
+    let magnitude = columns[0].x.hypot(columns[0].y).hypot(columns[0].z);
+    if !magnitude.is_finite() || magnitude <= 0.0 {
+        return None;
+    }
+    let c = columns.map(|c| c / magnitude);
+    if c.iter().any(|c| (c.dot(*c) - 1.0).abs() > 1e-9) || c[0].dot(c[1]).abs() > 1e-9 || c[0].dot(c[2]).abs() > 1e-9 || c[1].dot(c[2]).abs() > 1e-9 {
+        return None;
+    }
+    let cross = vec3(c[1].y * c[2].z - c[1].z * c[2].y, c[1].z * c[2].x - c[1].x * c[2].z, c[1].x * c[2].y - c[1].y * c[2].x);
+    let factor = if c[0].dot(cross) < 0.0 { -magnitude } else { magnitude };
+    let mut rotation = Mat4::IDENTITY;
+    for row in 0..3 {
+        for col in 0..3 {
+            rotation.0[row][col] = a[row][col] / factor;
+        }
+    }
+    if (0..3).all(|row| (0..3).all(|col| (rotation.0[row][col] - if row == col { 1.0 } else { 0.0 }).abs() < 1e-12)) {
+        return Some((orientation, factor));
+    }
+    let r = (rotation * Mat4::orientation(Vec3::from(orientation))).0;
+    let sy = (-r[2][0]).clamp(-1.0, 1.0);
+    let y = sy.asin();
+    let (x, z) = if (1.0 - sy * sy).sqrt() > 1e-9 { (r[2][1].atan2(r[2][2]), r[1][0].atan2(r[0][0])) } else { ((-r[1][2]).atan2(r[1][1]), 0.0) };
+    Some(([x.to_degrees(), y.to_degrees(), z.to_degrees()], factor))
+}
+
+/// A parent change retains 2D transforms and the world-space anchor of 3D AV layers. Position is
 /// re-expressed in the new parent's space (`None`: the composition), evaluated at the current
 /// time.
 pub(crate) fn parent_fixes(s: &Session, cid: ItemId, ids: &[LayerId], parent: Option<LayerId>) -> Vec<ParentFix> {
@@ -623,18 +834,81 @@ pub(crate) fn parent_fixes(s: &Session, cid: ItemId, ids: &[LayerId], parent: Op
         (a[1][0].atan2(a[0][0]).to_degrees(), sx, if sx > 1e-12 { det / sx } else { 0.0 })
     };
     let new_m = space(parent);
-    let Some(inv) = new_m.inverse() else { return vec![] };
+    let Some(inv) = new_m.inverse() else {
+        // A tiny source PAR can make the legacy source-space matrix noninvertible even
+        // though the inherited par=1 parent space is an ordinary static skew transform.
+        return comp
+            .layers
+            .iter()
+            .filter(|l| ids.contains(&l.id) && !l.is_3d() && l.parent != parent)
+            .filter_map(|l| static_skew_parent_fix(&ectx, l, parent))
+            .collect();
+    };
     let (rn, sxn, syn) = decompose(&new_m);
-    comp.layers
+    let mut fixes: Vec<_> = comp
+        .layers
         .iter()
         .filter(|l| ids.contains(&l.id) && !l.is_3d() && l.parent != parent)
         .map(|l| {
+            if let Some(fix) = static_skew_parent_fix(&ectx, l, parent) {
+                return fix;
+            }
             let old_m = space(l.parent);
             let (ro, sxo, syo) = decompose(&old_m);
             let scale = [if sxn.abs() > 1e-12 { sxo / sxn } else { 1.0 }, if syn.abs() > 1e-12 { syo / syn } else { 1.0 }];
-            ParentFix { layer: l.id, m: inv * old_m, rotation: ro - rn, scale }
+            ParentFix { layer: l.id, m: inv * old_m, rotation: ro - rn, scale, pose_2d: None, position_3d: None, pose_3d: None }
         })
-        .collect()
+        .collect();
+    let space_3d = |id: Option<LayerId>| {
+        id.and_then(|id| comp.layer(id)).map_or(effectcraft_geom::Mat4::IDENTITY, |layer| {
+            // Parent transforms do not inherit the parent's source pixel-aspect stretch.
+            let world = ectx.world_matrix(layer);
+            let par = ectx.par_ratio(layer);
+            let a = layer.transform().map(|tr| ectx.v3(layer, tr, "anchor", [0.0; 3])).unwrap_or([0.0; 3]);
+            let anchor = effectcraft_geom::vec3(a[0], a[1], if layer.is_3d() { a[2] } else { 0.0 });
+            world
+                * effectcraft_geom::Mat4::translate(anchor)
+                * effectcraft_geom::Mat4::scale(effectcraft_geom::vec3(1.0 / par, 1.0, 1.0))
+                * effectcraft_geom::Mat4::translate(-anchor)
+        })
+    };
+    if let Some(inv) = space_3d(parent).inverse().filter(|m| m.0.iter().flatten().all(|v| v.is_finite())) {
+        for layer in comp.layers.iter().filter(|l| ids.contains(&l.id) && l.is_3d() && !l.is_camera() && !l.is_light() && l.parent != parent) {
+            let m = inv * space_3d(layer.parent);
+            if m.0.iter().flatten().all(|v| v.is_finite()) {
+                let pose_3d = layer.transform().and_then(|tr| {
+                    let orientation = tr.get("orientation")?;
+                    let scale = tr.get("scale")?;
+                    // Animated Euler Orientation and auto-orient cannot be re-expressed by
+                    // prepending a constant Euler value. Expression-driven values stay authored.
+                    if !orientation.keys.is_empty()
+                        || orientation.expr.is_some()
+                        || scale.expr.is_some()
+                        || layer.auto_orient != effectcraft_project::AutoOrient::Off
+                    {
+                        return None;
+                    }
+                    let pose = uniform_parent_pose(m, orientation.value.as_vec3())?;
+                    let factor = pose.1;
+                    let values_finite = std::iter::once(&scale.value)
+                        .chain(scale.keys.iter().map(|key| &key.value))
+                        .all(|value| value.as_vec3().iter().all(|v| (v * factor).is_finite()));
+                    let speeds_finite = scale.keys.iter().flat_map(|key| key.in_ease.iter().chain(&key.out_ease)).all(|ease| (ease.speed * factor).is_finite());
+                    (values_finite && speeds_finite).then_some(pose)
+                });
+                fixes.push(ParentFix {
+                    layer: layer.id,
+                    m: effectcraft_geom::Mat3::IDENTITY,
+                    rotation: 0.0,
+                    scale: [1.0; 2],
+                    pose_2d: None,
+                    position_3d: Some(m),
+                    pose_3d,
+                });
+            }
+        }
+    }
+    fixes
 }
 
 /// Validate the proposed ancestor chain before any authored edit, including when compensation
@@ -711,6 +985,18 @@ fn timing(s: &mut Session, p: &Value) -> Result<Value> {
     let fr = s.project.comp(cid).ok_or(EngineError::NoComp)?.frame_rate;
     let snap = |k: &str| f_p(p, k).map(|v| fr.snap_nearest(Tick::from_seconds_f64(v)));
     let (delta, start, inp, outp) = (snap("delta"), snap("start"), snap("in"), snap("out"));
+    let stagger = snap("stagger");
+    let mut offsets = std::collections::HashMap::new();
+    if let Some(interval) = stagger {
+        for (i, id) in ids.iter().enumerate() {
+            let ticks = i64::try_from(i)
+                .ok()
+                .and_then(|i| interval.0.checked_mul(i))
+                .filter(|ticks| (Tick::MIN.0..=Tick::MAX.0).contains(ticks))
+                .ok_or_else(|| bad("layer.timing", "stagger interval is too large"))?;
+            offsets.insert(*id, Tick(ticks));
+        }
+    }
     s.edit("Layer Timing", merge_p(p), |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         let fd = comp.frame_duration();
@@ -732,6 +1018,11 @@ fn timing(s: &mut Session, p: &Value) -> Result<Value> {
                 "trimInToTime" => l.in_point = t.min(l.out_point - fd),
                 "trimOutToTime" => l.out_point = t.max(l.in_point + fd),
                 _ => {
+                    if let Some(d) = offsets.get(&l.id).copied()
+                        && !l.switches.locked
+                    {
+                        shift(l, d);
+                    }
                     if let Some(d) = delta {
                         shift(l, d);
                     }
@@ -774,7 +1065,9 @@ fn slip(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let dur = match &l.source {
             LayerSource::Footage { item } => match s.project.item(*item).map(|i| &i.kind) {
-                Some(ItemKind::Footage(f)) if f.kind != effectcraft_project::FootageKind::Still => Some(Tick(f.duration.0 * f.loop_count.max(1) as i64)),
+                Some(ItemKind::Footage(f)) if f.kind != effectcraft_project::FootageKind::Still => {
+                    Some(f.duration.mul_ratio(i64::from(f.loop_count.max(1)), 1).clamp(Tick::MIN, Tick::MAX))
+                }
                 _ => None,
             },
             LayerSource::Comp { item } => s.project.comp(*item).map(|c| c.duration),
@@ -1333,13 +1626,13 @@ pub fn specs() -> Vec<CommandSpec> {
             has_layers,
             track_matte
         ),
-        cmd!("layer.setParent", "Parent", [], None, "{layers?, parent: layer|null}", has_layers, set_parent),
+        cmd!("layer.setParent", "Parent", [], None, "{layers?, parent: layer|null, compensate?: bool}", has_layers, set_parent),
         cmd!(
             "layer.timing",
             "Layer Timing",
             [],
             None,
-            "{layers?, op?: moveInToTime|moveOutToTime|trimInToTime|trimOutToTime, delta?, start?, in?, out?, merge?}",
+            "{layers?, op?: moveInToTime|moveOutToTime|trimInToTime|trimOutToTime, delta?, stagger? (seconds per selection index, first layer anchored), start?, in?, out?, merge?}",
             has_layers,
             timing
         ),

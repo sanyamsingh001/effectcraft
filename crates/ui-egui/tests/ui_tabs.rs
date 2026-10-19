@@ -64,7 +64,10 @@ fn group_of(n: &DockNode, p: PanelKind) -> Option<Vec<PanelKind>> {
     match n {
         DockNode::Split { a, b, .. } => group_of(a, p).or_else(|| group_of(b, p)),
         DockNode::Tabs { panels, .. } => panels.contains(&p).then(|| panels.clone()),
-        DockNode::Stack { entries } => entries.iter().any(|e| e.panel == p).then(|| entries.iter().map(|e| e.panel).collect()),
+        DockNode::Stack { entries } => entries.iter().find_map(|e| match e.group.as_deref() {
+            Some(n) => group_of(n, p),
+            None => (e.panel == p).then(|| vec![p]),
+        }),
     }
 }
 
@@ -233,6 +236,99 @@ fn stacked_panel_gaps_resize_the_panels() {
     let gap = rect(&h, "dock.gutter.bs0");
     drag(&mut h, gap.center(), gap.center() - egui::vec2(0.0, 400.0));
     assert!((rect(&h, "panel.Preview").height() - 40.0).abs() < 1.0, "{}", rect(&h, "panel.Preview").height());
+}
+
+/// #301: the header's empty space toggles the panel, with tab and menu controls preserved.
+#[test]
+fn stacked_panel_headers_toggle_across_the_whole_bar() {
+    let (mut h, _, _) = harness();
+    let header = rect(&h, "panel.header.Audio");
+    let blank = pos2(header.max.x - 12.0, header.center().y);
+    assert!(!h.state().ui.dock.is_visible(PanelKind::Audio));
+    click_n(&mut h, blank, 1);
+    assert!(h.state().ui.dock.is_visible(PanelKind::Audio));
+    let header = rect(&h, "panel.header.Audio");
+    click_n(&mut h, pos2(header.max.x - 12.0, header.center().y), 1);
+    assert!(!h.state().ui.dock.is_visible(PanelKind::Audio));
+    // The panel menu remains a separate action on an expanded header.
+    let header = rect(&h, "panel.header.Audio");
+    click_n(&mut h, pos2(header.max.x - 12.0, header.center().y), 1);
+    let menu = rect(&h, "panel.menu.Audio").center();
+    click_n(&mut h, menu, 1);
+    assert!(h.state().ui.dock.is_visible(PanelKind::Audio));
+}
+
+/// #302: center drops make tabs in the stacked slot, with the existing accordion behavior.
+#[test]
+fn drops_into_stacked_panels_make_tabs_in_that_slot() {
+    let (mut h, _, _) = harness();
+    let before_preview = rect(&h, "panel.Preview");
+    let align = rect(&h, "panel.tab.Align");
+    let properties = rect(&h, "panel.Properties");
+    drag(&mut h, align.center(), properties.center());
+    assert_eq!(group_of(&h.state().ui.dock, PanelKind::Properties), Some(vec![PanelKind::Properties, PanelKind::Align]));
+    assert!(h.state().ui.dock.is_visible(PanelKind::Align));
+    assert!(!h.state().ui.dock.is_visible(PanelKind::Properties));
+    assert_eq!(rect(&h, "panel.Preview"), before_preview);
+    // Clicking an inactive tab switches the shown panel without collapsing the slot.
+    let props_tab = rect(&h, "panel.tab.Properties");
+    click_n(&mut h, props_tab.center(), 1);
+    assert!(h.state().ui.dock.is_visible(PanelKind::Properties));
+    let header = rect(&h, "panel.header.Properties");
+    click_n(&mut h, pos2(header.max.x - 12.0, header.center().y), 1);
+    assert!(!h.state().ui.dock.is_visible(PanelKind::Properties));
+    let align_tab = rect(&h, "panel.tab.Align");
+    click_n(&mut h, align_tab.center(), 1);
+    assert!(h.state().ui.dock.is_visible(PanelKind::Align));
+}
+
+/// #302: the side-drop preview applies to the target stacked slot, not the whole column.
+#[test]
+fn side_drops_split_only_the_target_stacked_panel() {
+    let (mut h, _, _) = harness();
+    let before_preview = rect(&h, "panel.Preview");
+    let before_audio = rect(&h, "panel.header.Audio");
+    let align = rect(&h, "panel.tab.Align");
+    let properties = rect(&h, "panel.Properties");
+    drag(&mut h, align.center(), pos2(properties.min.x + properties.width() * 0.08, properties.center().y));
+    let (align, properties) = (rect(&h, "panel.Align"), rect(&h, "panel.Properties"));
+    assert!(align.max.x <= properties.min.x + 1.0, "{align:?} {properties:?}");
+    assert_eq!(rect(&h, "panel.Preview"), before_preview);
+    // Removing Align's separate header adds its height back to the target slot; Audio still
+    // spans the whole column underneath the local split.
+    let audio = rect(&h, "panel.header.Audio");
+    assert_eq!((audio.min.x, audio.max.x, audio.min.y), (before_audio.min.x, before_audio.max.x, before_audio.min.y));
+}
+
+/// Visual review for #301/#302: grouped tabs and a split confined to a stacked slot.
+#[test]
+#[ignore]
+fn stacked_docking_snapshots() {
+    let (mut h, _, _) = harness();
+    let align = rect(&h, "panel.tab.Align");
+    let properties = rect(&h, "panel.Properties");
+    drag(&mut h, align.center(), properties.center());
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out");
+    std::fs::create_dir_all(dir).unwrap();
+    h.render().expect("render").save(format!("{dir}/stacked-tabs.png")).unwrap();
+    let effects = rect(&h, "panel.tab.EffectsPresets");
+    let align = rect(&h, "panel.Align");
+    drag(&mut h, effects.center(), pos2(align.min.x + align.width() * 0.08, align.center().y));
+    h.render().expect("render").save(format!("{dir}/stacked-split.png")).unwrap();
+}
+
+/// #306: dragging past the viewer's minimum height keeps drawing and can be reversed.
+#[test]
+fn viewer_timeline_divider_stops_at_the_minimum_height() {
+    let (mut h, _, _) = harness();
+    let gap = rect(&h, "dock.gutter.a");
+    drag(&mut h, gap.center(), pos2(gap.center().x, 0.0));
+    h.run_steps(3);
+    assert!(h.state().ui.dock.contains(PanelKind::Composition));
+    let clamped = rect(&h, "dock.gutter.a");
+    assert!(clamped.center().y > 0.0);
+    drag(&mut h, clamped.center(), clamped.center() + egui::vec2(0.0, 200.0));
+    assert!(rect(&h, "dock.gutter.a").center().y > clamped.center().y + 150.0);
 }
 
 /// Issue #45: the Project panel's details (name, size, duration) stay inside the panel with a

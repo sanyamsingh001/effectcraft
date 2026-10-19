@@ -2,6 +2,7 @@
 //! effect, mask, shape item or text animator (what scripting's `PropertyGroup.name`, `enabled`,
 //! `remove()`, `duplicate()` and `moveTo()` do, and what agents need without a UI selection).
 
+use effectcraft_effects::puppet;
 use effectcraft_project::{GroupKind, ItemId, LayerId, LayerSource, Node, PropGroup, Uid};
 use serde_json::{Value, json};
 
@@ -201,6 +202,18 @@ pub(crate) fn duplicate_contents(s: &mut Session, items: &[(LayerId, Uid)]) -> R
 fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "prop.duplicateGroup";
     let (cid, lid, uid) = group_ref(s, p, c, true)?;
+    let layer = s.project.comp(cid).and_then(|comp| comp.layer(lid)).ok_or(EngineError::NoComp)?;
+    let attached_mesh = layer
+        .effects()
+        .into_iter()
+        .flat_map(|effects| effects.groups().filter(|group| puppet::is_puppet(group)))
+        .flat_map(puppet::meshes)
+        .find(|mesh| puppet::pins(mesh).any(|pin| pin.uid == uid && pin.get("attachment").is_some_and(|p| p.value.as_bool())));
+    if let Some(mesh) = attached_mesh
+        && puppet::pins(mesh).filter(|pin| pin.get("attachment").is_some_and(|p| p.value.as_bool())).count() >= puppet::MAX_ATTACHMENTS
+    {
+        return Err(bad(c, "Puppet mesh already has 32 attached pins"));
+    }
     s.edit("Duplicate", None, |proj, _| {
         let mut next = proj.next_id;
         let l = layer_mut(proj, cid, lid)?;

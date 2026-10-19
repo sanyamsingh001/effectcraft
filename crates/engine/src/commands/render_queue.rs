@@ -342,7 +342,7 @@ fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<
         };
     }
     if let Some(r) = p.get("sampleRate").and_then(Value::as_u64) {
-        om.audio_sample_rate = (r as u32).clamp(8_000, 192_000);
+        om.audio_sample_rate = r.clamp(8_000, 192_000) as u32;
     }
     match p.get("audioChannels") {
         Some(Value::Number(n)) => om.audio_channels = if n.as_u64() == Some(1) { 1 } else { 2 },

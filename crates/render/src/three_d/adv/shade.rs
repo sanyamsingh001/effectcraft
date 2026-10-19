@@ -136,15 +136,34 @@ pub fn sample(t: &TexInfo, texels: &[[f32; 4]], u: f32, v: f32) -> [f32; 4] {
     if w == 0 || h == 0 {
         return [1.0; 4];
     }
-    let x = u * w as f32 - 0.5;
-    let y = v * h as f32 - 0.5;
+    // Reduce UVs before converting to integer texels. Model UVs may be outside 0..1,
+    // including values too large for i64; wrapping in f64 keeps neighbour indices bounded.
+    let coordinate = |value: f32, mode: u32| {
+        let value = f64::from(value);
+        if !value.is_finite() {
+            return 0.0;
+        }
+        match mode {
+            1 => value.clamp(0.0, 1.0),
+            2 => value.rem_euclid(2.0),
+            _ => value.rem_euclid(1.0),
+        }
+    };
+    let x = coordinate(u, t.wrap_u) * w as f64 - 0.5;
+    let y = coordinate(v, t.wrap_v) * h as f64 - 0.5;
     let (x0, y0) = (x.floor(), y.floor());
-    let (fx, fy) = (x - x0, y - y0);
+    let (fx, fy) = ((x - x0) as f32, (y - y0) as f32);
     let (x0, y0) = (x0 as i64, y0 as i64);
     let get = |xi: i64, yi: i64| -> [f32; 4] {
         let xi = wrap(xi, w, t.wrap_u);
         let yi = wrap(yi, h, t.wrap_v);
-        texels.get(t.offset as usize + (yi * w + xi) as usize).copied().unwrap_or([0.0; 4])
+        (yi as usize)
+            .checked_mul(t.width as usize)
+            .and_then(|row| row.checked_add(xi as usize))
+            .and_then(|index| index.checked_add(t.offset as usize))
+            .and_then(|index| texels.get(index))
+            .copied()
+            .unwrap_or([0.0; 4])
     };
     let (a, b, c, d) = (get(x0, y0), get(x0 + 1, y0), get(x0, y0 + 1), get(x0 + 1, y0 + 1));
     let mut o = [0.0; 4];

@@ -321,6 +321,29 @@ fn ieee_extended(v: f64) -> [u8; 10] {
     out
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct AudioFileLayout {
+    frames: u32,
+    pcm_bytes: usize,
+    chunk_bytes: u32,
+}
+
+/// Bound both the format's 32-bit chunk fields and the target's buffer layout before mixing.
+fn audio_file_layout(start: i64, end: i64, block_align: u16, aiff: bool, buffer_limit: usize) -> Option<AudioFileLayout> {
+    if block_align == 0 {
+        return None;
+    }
+    let frames = u32::try_from((i128::from(end) - i128::from(start)).max(0)).ok()?;
+    let pcm_bytes = u64::from(frames).checked_mul(u64::from(block_align))?;
+    let chunk_bytes = pcm_bytes.checked_add(if aiff { 46 } else { 36 })?.checked_add(pcm_bytes % 2)?;
+    let chunk_bytes = u32::try_from(chunk_bytes).ok()?;
+    let file_bytes = usize::try_from(u64::from(chunk_bytes) + 8).ok()?;
+    if file_bytes > buffer_limit {
+        return None;
+    }
+    Some(AudioFileLayout { frames, pcm_bytes: usize::try_from(pcm_bytes).ok()?, chunk_bytes })
+}
+
 /// WAV or AIFF: the comp's audio over the render span (Audio Output: sample rate, mono/stereo,
 /// 16/24-bit integer or 32-bit float; AIFF has no float in plain AIFF, so it writes 24-bit).
 pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> Result<Report> {
@@ -338,8 +361,12 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
     let (span_start, span_end) = job.settings.span(comp);
     let start = span_start.to_units_floor(sr as i64);
     let end = span_end.to_units_floor(sr as i64);
-    let n = (end - start).max(0) as usize;
-    let mut pcm = Vec::with_capacity(n * (channels * bytes_per_sample) as usize);
+    let block_align = channels * bytes_per_sample;
+    let layout = audio_file_layout(start, end, block_align, aiff, isize::MAX as usize)
+        .ok_or_else(|| crate::ExportError::Unsupported("Audio output exceeds WAV/AIFF size or memory limits; shorten the render span".into()))?;
+    let n = layout.frames as usize;
+    let mut pcm = Vec::new();
+    pcm.try_reserve_exact(layout.pcm_bytes).map_err(|_| crate::ExportError::Encode("Not enough memory for audio PCM output".into()))?;
     // Mix in one-second blocks, reporting progress in frames.
     let block = sr as usize;
     let mut done = 0usize;
@@ -347,7 +374,9 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
     let mut reported = 0u64;
     while done < n {
         let k = block.min(n - done);
-        let t = Tick((((start + done as i64) as i128 * TICKS_PER_SECOND as i128) / sr as i128) as i64);
+        let sample = start + done as i64;
+        let t = Tick::from_units(sample, i64::from(sr));
+        let t = if t.to_units_floor(i64::from(sr)) < sample { Tick(t.0.saturating_add(1)) } else { t };
         pcm.extend(pcm_bytes(&mix(job, t, k, sr), fmt, aiff));
         done += k;
         let now = (done as u64 * total_frames / n.max(1) as u64).min(total_frames);
@@ -359,9 +388,9 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
     if reported < st.total {
         st.advance(st.total - reported)?;
     }
-    let block_align = channels * bytes_per_sample;
-    let frames = (pcm.len() / block_align as usize) as u32;
-    let mut out = vec![];
+    let frames = layout.frames;
+    let mut out = Vec::new();
+    out.try_reserve_exact(layout.chunk_bytes as usize + 8).map_err(|_| crate::ExportError::Encode("Not enough memory for audio container output".into()))?;
     if aiff {
         let mut comm = vec![];
         comm.extend_from_slice(&channels.to_be_bytes());
@@ -370,7 +399,7 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
         comm.extend_from_slice(&ieee_extended(sr as f64));
         let ssnd_len = 8 + pcm.len();
         out.extend_from_slice(b"FORM");
-        out.extend_from_slice(&((4 + 8 + comm.len() + 8 + ssnd_len + ssnd_len % 2) as u32).to_be_bytes());
+        out.extend_from_slice(&layout.chunk_bytes.to_be_bytes());
         out.extend_from_slice(b"AIFF");
         out.extend_from_slice(b"COMM");
         out.extend_from_slice(&(comm.len() as u32).to_be_bytes());
@@ -386,7 +415,7 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
         // WAVE_FORMAT_PCM (1) or WAVE_FORMAT_IEEE_FLOAT (3).
         let tag: u16 = if fmt == AudioFormat::F32 { 3 } else { 1 };
         out.extend_from_slice(b"RIFF");
-        out.extend_from_slice(&((36 + pcm.len() + pcm.len() % 2) as u32).to_le_bytes());
+        out.extend_from_slice(&layout.chunk_bytes.to_le_bytes());
         out.extend_from_slice(b"WAVEfmt ");
         out.extend_from_slice(&16u32.to_le_bytes());
         out.extend_from_slice(&tag.to_le_bytes());
@@ -422,5 +451,42 @@ mod tests {
         assert_eq!(id_bytes(EBML), vec![0x1A, 0x45, 0xDF, 0xA3]);
         assert_eq!(ieee_extended(44100.0), [0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]);
         assert_eq!(ieee_extended(48000.0)[..4], [0x40, 0x0E, 0xBB, 0x80]);
+    }
+    #[test]
+    fn audio_layout_preserves_normal_headers_and_padding() {
+        for (align, frames) in [(2, 8), (3, 1), (4, 9), (6, 1), (8, 48000)] {
+            for aiff in [false, true] {
+                let layout = audio_file_layout(7, 7 + frames, align, aiff, isize::MAX as usize).unwrap();
+                assert_eq!(layout.frames, frames as u32);
+                assert_eq!(layout.pcm_bytes, frames as usize * align as usize);
+                assert_eq!(layout.chunk_bytes as usize, layout.pcm_bytes + layout.pcm_bytes % 2 + if aiff { 46 } else { 36 });
+            }
+        }
+        assert_eq!(audio_file_layout(3, 2, 2, false, isize::MAX as usize).unwrap().frames, 0);
+    }
+
+    #[test]
+    fn audio_layout_rejects_unrepresentable_format_and_buffer_sizes() {
+        for aiff in [false, true] {
+            let overhead = if aiff { 46u64 } else { 36 };
+            // A 32-bit chunk is representable right below its limit; the next stereo frame is not.
+            let maximum = (u64::from(u32::MAX) - overhead) / 8;
+            let accepted = audio_file_layout(0, maximum as i64, 8, aiff, usize::MAX).unwrap();
+            assert!(u64::from(accepted.chunk_bytes) + 8 <= u64::from(u32::MAX) + 8);
+            assert!(audio_file_layout(0, maximum as i64 + 1, 8, aiff, usize::MAX).is_none());
+            assert!(audio_file_layout(0, i64::MAX, 8, aiff, usize::MAX).is_none());
+            assert!(audio_file_layout(i64::MIN, i64::MAX, 8, aiff, usize::MAX).is_none());
+            // Exercise the 32-bit isize boundary on every host without allocating the buffers.
+            let limit = i32::MAX as usize;
+            let maximum = (limit as u64 - overhead - 8) / 8;
+            assert!(audio_file_layout(0, maximum as i64, 8, aiff, limit).is_some());
+            assert!(audio_file_layout(0, maximum as i64 + 1, 8, aiff, limit).is_none());
+        }
+        assert!(audio_file_layout(0, 1, 0, false, usize::MAX).is_none());
+        assert!(audio_file_layout(0, i64::from(u32::MAX) + 1, 2, false, usize::MAX).is_none());
+        // Ordinary long 192kHz stereo output exceeds the classic containers.
+        for aiff in [false, true] {
+            assert!(audio_file_layout(0, (if aiff { 7200 } else { 3600 }) * 192000, if aiff { 6 } else { 8 }, aiff, usize::MAX).is_none());
+        }
     }
 }

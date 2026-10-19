@@ -401,6 +401,96 @@ fn fill_options_paint_the_next_shape() {
     assert_eq!(gfill.get("opacity").unwrap().value.as_f64(), 40.0);
 }
 
+/// #290: a Pen press and its tangent drag form one undoable gesture.
+#[test]
+fn pen_point_and_tangent_drag_are_one_undo_step() {
+    let mut h = harness();
+    let plate = h.state().session.active_comp().unwrap().layers[1].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate.0]})).unwrap();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(3);
+    fn path(h: &Harness<'_, EffectcraftApp>, plate: LayerId) -> effectcraft_keyframe::ShapePath {
+        h.state().session.active_comp().unwrap().layer(plate).unwrap().props.prop("masks/#1/path").unwrap().value.as_path().unwrap().clone()
+    }
+    let (from, to) = (screen(&h, [200.0, 100.0]), screen(&h, [230.0, 120.0]));
+    drag(&mut h, from, to);
+    let first = path(&h, plate);
+    assert_eq!(first.vertices.len(), 1);
+    assert!(first.out_tangents[0].iter().any(|v| v.abs() > 1.0));
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(3);
+    assert!(
+        h.state().session.active_comp().unwrap().layer(plate).unwrap().masks().unwrap().groups().next().is_none(),
+        "one Undo removes the point and its tangent together"
+    );
+    h.state_mut().session.execute("edit.redo", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(path(&h, plate), first);
+    let (from, to) = (screen(&h, [400.0, 120.0]), screen(&h, [430.0, 150.0]));
+    drag(&mut h, from, to);
+    assert_eq!(path(&h, plate).vertices.len(), 2);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(path(&h, plate), first, "the earlier point keeps its own undo step");
+}
+
+#[test]
+fn pen_clicks_each_keep_their_own_undo_step() {
+    let mut h = harness();
+    let plate = h.state().session.active_comp().unwrap().layers[1].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate.0]})).unwrap();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(3);
+    for point in [[200.0, 100.0], [400.0, 120.0], [300.0, 260.0]] {
+        let at = screen(&h, point);
+        click(&mut h, at);
+    }
+    for count in (1..=3).rev() {
+        let layer = h.state().session.active_comp().unwrap().layer(plate).unwrap();
+        assert_eq!(layer.props.prop("masks/#1/path").unwrap().value.as_path().unwrap().vertices.len(), count);
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(3);
+    }
+    assert!(h.state().session.active_comp().unwrap().layer(plate).unwrap().masks().unwrap().groups().next().is_none());
+}
+
+#[test]
+fn shape_pen_point_and_tangent_drag_are_one_undo_step() {
+    let mut h = harness();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(3);
+    let layers_before = h.state().session.active_comp().unwrap().layers.len();
+    let (from, to) = (screen(&h, [200.0, 100.0]), screen(&h, [230.0, 120.0]));
+    drag(&mut h, from, to);
+    let vertex = h.state().session.state.selected_vertices[0];
+    let path = |h: &Harness<'_, EffectcraftApp>| {
+        h.state()
+            .session
+            .active_comp()
+            .unwrap()
+            .layer(vertex.layer)
+            .unwrap()
+            .props
+            .find_group(vertex.mask)
+            .unwrap()
+            .get("path")
+            .unwrap()
+            .value
+            .as_path()
+            .unwrap()
+            .clone()
+    };
+    let first = path(&h);
+    assert_eq!(first.vertices.len(), 1);
+    assert!(first.out_tangents[0].iter().any(|v| v.abs() > 1.0));
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().session.active_comp().unwrap().layers.len(), layers_before, "Undo removes the shape point and its tangent together");
+    h.state_mut().session.execute("edit.redo", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(path(&h), first);
+}
+
 #[test]
 fn shape_pen_draws_a_closed_shape_layer() {
     let mut h = harness();
@@ -752,6 +842,44 @@ fn puppet_harness() -> (Harness<'static, EffectcraftApp>, u64, u64) {
     h.state_mut().ui.tool = Tool::PuppetBend;
     h.run_steps(3);
     (h, id, bend)
+}
+
+/// #284: placing another pin must use the deformed artwork, including areas outside the
+/// source bounds, and must keep the tool on the layer already being rigged.
+#[test]
+fn puppet_places_pins_on_the_deformed_shape_outside_source_bounds() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": ["Box"]})).unwrap();
+    let layer = s.state.selected_layers[0];
+    let first = s.execute("puppet.addPin", json!({"layer": layer.0, "position": [10, 40]})).unwrap()["pin"].as_u64().unwrap();
+    s.execute("puppet.movePin", json!({"layer": layer.0, "pin": first, "position": [130, 40]})).unwrap();
+    h.state_mut().ui.tool = Tool::Puppet;
+    h.run_steps(3);
+    let at = screen(&h, [440.0, 180.0]);
+    click(&mut h, at);
+    assert_eq!(h.state().session.state.selected_layers, vec![layer]);
+    let info = h.state_mut().session.execute("puppet.info", json!({"layer": layer.0})).unwrap();
+    let pins = info["meshes"][0]["pins"].as_array().unwrap();
+    assert_eq!(pins.len(), 2);
+    let pin = pins.iter().find(|pin| pin["pin"].as_u64() != Some(first)).unwrap();
+    let rest = pin["rest"].as_array().unwrap();
+    assert!((rest[0].as_f64().unwrap() - 40.0).abs() < 1e-4 && (rest[1].as_f64().unwrap() - 40.0).abs() < 1e-4, "{pin}");
+}
+
+#[test]
+fn puppet_click_away_keeps_the_selected_layer() {
+    let mut h = harness();
+    h.state_mut().session.execute("layer.select", json!({"layers": ["Box"]})).unwrap();
+    let layer = h.state().session.state.selected_layers[0];
+    h.state_mut().ui.tool = Tool::Puppet;
+    h.run_steps(3);
+    // The full-frame Plate is under this click, but the tool is working on the Box.
+    let at = screen(&h, [200.0, 180.0]);
+    click(&mut h, at);
+    assert_eq!(h.state().session.state.selected_layers, vec![layer]);
+    let comp = h.state().session.active_comp().unwrap();
+    assert!(comp.layers.iter().all(|layer| layer.effects().unwrap().groups().all(|effect| !effectcraft_engine::effects::puppet::is_puppet(effect))));
 }
 
 fn pin_value(h: &Harness<'_, EffectcraftApp>, layer: u64, pin: u64, prop: &str) -> f64 {

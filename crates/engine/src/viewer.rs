@@ -226,7 +226,13 @@ impl BoxPoints {
 
 /// A layer's content box (`m`: layer → comp).
 fn layer_box(ctx: &EvalCtx, layer: &Layer, m: &Mat3) -> Option<BoxPoints> {
-    let b = effectcraft_render::content_bounds(ctx, layer)?;
+    let b = if matches!(layer.source, effectcraft_project::LayerSource::Shape) {
+        let contents = layer.props.sub("contents")?;
+        let b = effectcraft_render::shapes::snap_bounds(ctx, layer, contents)?;
+        [b.x0, b.y0, b.x1, b.y1]
+    } else {
+        effectcraft_render::content_bounds(ctx, layer)?
+    };
     let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
     let c = |x: f64, y: f64| {
         let q = m.apply(vec2(x, y));

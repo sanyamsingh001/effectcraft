@@ -82,6 +82,11 @@ pub fn overlay(app: &EffectcraftApp, ctx: &egui::Context, cid: ItemId, layer: &L
     Some(overlay)
 }
 
+/// Whether a layer-space point lies in the displayed, deformed Puppet mesh.
+pub fn contains(overlay: &Overlay, point: [f64; 2]) -> bool {
+    overlay.iter().any(|(_, mesh, deformed, _)| puppet::contains(mesh, deformed, point))
+}
+
 /// Keep a pin's keyframed Position in view in the Timeline after placing, moving or recording the
 /// pin in the viewer (#273).
 pub fn reveal_pin(app: &mut EffectcraftApp, layer: LayerId, pin: u64) {

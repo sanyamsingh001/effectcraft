@@ -76,7 +76,7 @@ pub use color_fx::{
 pub use color2::{Curve, auto_correct_settings, color_link_mode, color_link_sample, equalize_tables, luma_clip_points, shadow_highlight_amounts};
 pub use color3::OffsetCurve;
 pub use distort::transform_shutter;
-pub use distort2::{MAGNIFY_MODES, bezier_grid, parse_mesh};
+pub use distort2::{MAGNIFY_MODES, WarpMesh, bezier_grid, mesh_value, parse_mesh};
 pub use distort3::{RESHAPE_POINTS, ReshapeSetup, SmearSetup, reshape_setup, smear_setup, warp_inverse_map};
 pub use distort4::liquify_mesh;
 use effectcraft_keyframe::Value;
@@ -314,6 +314,10 @@ pub trait EffectHost: Sync {
     /// Dance / Shatter / Card Wipe's Comp Camera and First Comp Light). `None` when unknown.
     fn comp_scene(&self) -> Option<CompScene> {
         None
+    }
+    /// Whether an enabled composition camera is active at this frame (unknown hosts: false).
+    fn has_active_comp_camera(&self) -> bool {
+        false
     }
     /// The running effect's own parameters evaluated at another **layer time** (Radio Waves'
     /// Parameters Are Set At: Birth). `None` when unavailable.
@@ -565,6 +569,9 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
         let mut pr = Property::new(ids.alloc(), leaf, ps.name, default).with_ui(ps.ui.clone());
         if matches!(ps.ui, ParamUi::Point) {
             pr.spatial = true;
+        }
+        if spec.id == "ec.distort.meshwarp" && ps.id == "mesh" {
+            pr.hold_only = false;
         }
         if matches!(ps.ui, ParamUi::Checkbox | ParamUi::Popup { .. } | ParamUi::Layer) {
             pr.hold_only = true;

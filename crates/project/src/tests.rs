@@ -121,3 +121,65 @@ fn project_files_name_their_version_and_always_read_back() {
     assert!(crate::is_newer_version("0.2.0", "0.1.9") && crate::is_newer_version("1.0.0-rc.1", "0.9.9"));
     assert!(!crate::is_newer_version("0.1.1", "0.1.1") && !crate::is_newer_version("0.1.0", "0.1.1"));
 }
+
+fn finite_footage(kind: crate::FootageKind, rate: FrameRate, duration: Tick, loops: u32) -> crate::Item {
+    crate::Item {
+        id: crate::ItemId(1),
+        name: "Fractional clip".into(),
+        label: effectcraft_color::Label::Lavender,
+        comment: String::new(),
+        parent: None,
+        proxy: None,
+        kind: ItemKind::Footage(crate::Footage { kind, duration, frame_rate: rate, loop_count: loops, ..Default::default() }),
+    }
+}
+
+#[test]
+fn video_source_span_rounds_fractional_half_frame_duration_exactly() {
+    let rate = FrameRate::new(2469, 200);
+    let duration = Tick(30_864_641_556);
+    for loops in [1, 3] {
+        let clip = finite_footage(crate::FootageKind::Video, rate, duration, loops);
+        let frames = 2 * i64::from(loops);
+        assert_eq!(clip.source_span(), Some((rate.tick_of(frames), rate.tick_of(frames - 1))));
+    }
+    let before = finite_footage(crate::FootageKind::Video, rate, duration - Tick(1), 1);
+    assert_eq!(before.source_span(), Some((rate.tick_of(1), Tick::ZERO)), "the preceding tick still rounds to one frame");
+}
+
+#[test]
+fn footage_source_span_changes_only_at_exact_rational_rounding_boundaries() {
+    for rate in [FrameRate::new(2469, 200), FrameRate::FPS_24, FrameRate::FPS_30, FrameRate::FPS_23_976, FrameRate::FPS_29_97] {
+        let period = i128::from(effectcraft_time::TICKS_PER_SECOND) * i128::from(rate.den);
+        let denominator = 2 * i128::from(rate.num);
+        for n in (1..=8).chain([1_000_000]) {
+            let numerator = i128::from(2 * n + 1) * period;
+            let threshold = Tick(i64::try_from((numerator + denominator - 1) / denominator).unwrap());
+            for kind in [crate::FootageKind::Video, crate::FootageKind::Audio] {
+                for loops in [1, 3] {
+                    for (duration, per_loop) in [(threshold - Tick(1), n), (threshold, n + 1)] {
+                        let total = per_loop * i64::from(loops);
+                        let clip = finite_footage(kind, rate, duration, loops);
+                        let ItemKind::Footage(f) = &clip.kind else { panic!("footage") };
+                        assert_eq!(f.source_frame_count(), Some(per_loop), "the source count excludes loops and keeps one-tick boundaries exact");
+                        assert_eq!(
+                            clip.source_span(),
+                            Some((rate.tick_of(total), rate.tick_of(total - 1))),
+                            "{rate:?} {kind:?} duration={duration:?} loops={loops}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sequence_source_span_uses_file_count_at_fractional_rate() {
+    let rate = FrameRate::new(2469, 200);
+    let mut clip = finite_footage(crate::FootageKind::Sequence, rate, Tick(30_864_641_556), 2);
+    let ItemKind::Footage(f) = &mut clip.kind else { panic!("footage") };
+    f.sequence = vec!["frame1.png".into(), "frame2.png".into(), "frame3.png".into()];
+    assert_eq!(f.source_frame_count(), Some(3));
+    assert_eq!(clip.source_span(), Some((rate.tick_of(6), rate.tick_of(5))), "sequence files determine the count even when metadata rounds to two frames");
+}

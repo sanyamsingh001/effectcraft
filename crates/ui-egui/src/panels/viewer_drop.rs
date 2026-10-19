@@ -24,8 +24,8 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &egui::Ui, painter: &egui::Pain
     let stroke = Stroke::new(2.0, app.tokens.accent);
     let at = map.to_comp(ptr);
     let action: Option<(&str, Value)> = match payload.as_ref() {
-        DragPayload::Effect(effect) => layer_at(ectx, at).map(|l| {
-            if let Some((_, q, _)) = layer_quad(ectx, l) {
+        DragPayload::Effect(effect) => layer_at(ectx, at, app.session.footage.as_ref()).map(|l| {
+            if let Some((_, q, _)) = layer_quad(ectx, l, app.session.footage.as_ref()) {
                 painter.add(egui::Shape::closed_line(q.iter().map(|c| map.to_screen(*c)).collect(), stroke));
             }
             ("effect.apply", json!({"effect": effect, "layers": [l.id.0]}))

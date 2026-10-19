@@ -159,7 +159,7 @@ fn new_mask(s: &mut Session, p: &Value) -> Result<Value> {
     let path = ShapePath { vertices: v, in_tangents: ins, out_tangents: outs, closed: b_p(p, "closed").unwrap_or(false), feather: Vec::new() };
     let mode = str_p(p, "mode").and_then(MaskMode::from_name).unwrap_or(MaskMode::Add);
     let cycle = s.prefs.appearance.cycle_mask_colors;
-    let uid = s.edit("New Mask", None, |proj, st| {
+    let uid = s.edit("New Mask", merge_p(p), |proj, st| {
         let mut next = proj.next_id;
         let l = layer_mut(proj, cid, lid)?;
         let masks = l.props.sub_mut("masks").ok_or_else(|| bad("mask.new", "this layer can't have masks"))?;

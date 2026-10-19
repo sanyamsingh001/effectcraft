@@ -23,6 +23,7 @@ effectcraft-plugin = { workspace = true }
 effectcraft-plugin = { workspace = true, features = ["wasm"] }
 
 [dev-dependencies]
+exr = { workspace = true }
 serde_json = { workspace = true }
 effectcraft-psd = { workspace = true }
 effectcraft-svg = { workspace = true }

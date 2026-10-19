@@ -26,6 +26,7 @@ pub mod prefs_live;
 pub mod state;
 pub mod theme;
 pub mod widgets;
+mod workspaces;
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -322,6 +323,7 @@ impl EffectcraftApp {
             template_list: None,
         }
         .with_ui_commands()
+        .with_saved_workspaces()
     }
 
     /// Offer the frontend's commands (tools, timeline navigation…) for keyboard shortcuts.
@@ -352,6 +354,14 @@ impl EffectcraftApp {
         self.ui.theme = theme::ThemeKind::from_name(&p.appearance.theme).unwrap_or_default();
         self.tokens = Tokens::from_prefs(p);
         theme::apply_visuals(ctx, &self.tokens);
+        // Apply the stored factor only when it changes; an unrelated preference change must
+        // preserve egui's keyboard zoom shortcuts.
+        let scale = p.appearance.ui_scale as f32;
+        let id = egui::Id::new("prefs-ui-scale");
+        if ctx.data(|d| d.get_temp::<f32>(id)) != Some(scale) {
+            ctx.set_zoom_factor(scale);
+            ctx.data_mut(|d| d.insert_temp(id, scale));
+        }
         let tips = p.general.show_tool_tips;
         ctx.all_styles_mut(|s| s.interaction.tooltip_delay = if tips { 0.5 } else { f32::INFINITY });
         self.ui.cache_when_idle = p.previews.cache_frames_when_idle;
@@ -470,13 +480,12 @@ impl EffectcraftApp {
         }
     }
 
-    /// Keep GPU-composited viewer frames on the GPU (drawn from their texture). The browser can't
-    /// read frames back (its thread can't wait for the GPU), so there the viewer shows GPU frames
-    /// directly whenever it draws them plainly (RGB, no exposure, no region of interest); the
-    /// desktop reads them back (see [`frames::RenderSource::gpu_display`]).
+    /// Plain viewer frames can stay in their GPU textures. Native disk-cache persistence needs
+    /// CPU pixels, so it retains its readback path; the browser cannot read back synchronously.
+    /// Sampling and display controls read texture pixels on demand (`viewer_pixels`).
     fn gpu_display(&self) -> bool {
         let v = &self.session.state.viewer;
-        cfg!(target_arch = "wasm32")
+        (cfg!(target_arch = "wasm32") || self.session.disk_cache.is_none())
             && v.channel == effectcraft_engine::viewer::Channel::Rgb
             && v.exposure == 0.0
             && self.session.state.region_of_interest.is_none()
@@ -671,7 +680,11 @@ impl EffectcraftApp {
             frame: 0,
             scale: (scale * 1000.0).round() as u32,
             view: self.view_hash(comp),
-            opts: frames::opts_hash(&self.frame_opts(comp, scale)),
+            // Native GPU textures and disk-persisted CPU frames need distinct entries.
+            // Keep existing native disk keys and all browser keys unchanged, including while
+            // an earlier frame job is still finishing after a disk-cache setting change.
+            opts: frames::opts_hash(&self.frame_opts(comp, scale))
+                ^ if !cfg!(target_arch = "wasm32") && self.session.disk_cache.is_none() { 1 << 63 } else { 0 },
         }
     }
 
@@ -744,6 +757,10 @@ impl EffectcraftApp {
         let key = self.frame_key(comp, frame, scale);
         let t = c.frame_rate.tick_of(frame);
         let opts = self.frame_opts(comp, scale);
+        let [width, height] = frames::preview_size(c.width, c.height, opts.roi, scale);
+        if !self.frames.is_cached(&key) && self.frames.preview_capacity(width, height, 1.0, false) == 0 {
+            return;
+        }
         if urgent {
             self.frames.request_urgent(&self.render_source(), key, comp, t, opts);
         } else {
@@ -940,6 +957,14 @@ impl EffectcraftApp {
         };
         let looping = plan.is_none_or(|p| p.looping);
         let video = plan.is_none_or(|p| p.video);
+        if self.playback.playing && video && self.frames_that_fit(&c, scale) == 0 {
+            self.stop();
+            self.playback.waiting = false;
+            self.playback.audio_held = false;
+            self.toast = Some(("Frame exceeds cache budget; lower resolution or increase RAM preview memory".into(), now));
+            ctx.request_repaint();
+            return;
+        }
         // Prefetch ahead.
         let cur = fr.frame_at(self.session.time());
         // While paused (scrubbing, editing) the viewer's frame comes first: prefetch only a few
@@ -956,7 +981,7 @@ impl EffectcraftApp {
         } else {
             // Keep workers available for a newly edited viewer frame. Running obsolete
             // background renders cannot be preempted by the priority queue.
-            self.frames_parallelism().saturating_sub(1).min(2) as i64
+            (self.frames_parallelism().saturating_sub(1).min(2) as i64).min(self.frames_that_fit(&c, scale).saturating_sub(1).max(0))
         };
         let mut queued = self.frames.inflight();
         let series = self.frame_series(cid, scale);
@@ -964,7 +989,7 @@ impl EffectcraftApp {
             && let Some(p) = plan
         {
             // Cache Before Playback: the range in play order, then start the clock. A range
-            // larger than the RAM preview budget is cut to the frames that fit (caching more
+            // larger than the preview cache budget is cut to the frames that fit (caching more
             // would evict the first ones and never finish).
             let mut all = true;
             let n = (p.end - p.start) / p.step + 1;
@@ -973,7 +998,7 @@ impl EffectcraftApp {
                 let mut cut = p;
                 (cut.start, cut.end) = (p.first, (p.first + (fit - 1) * p.step).min(p.end));
                 self.playback.plan = Some(cut);
-                self.toast = Some((format!("Preview cut to {fit} of {n} frames: no more fit in the RAM preview (Settings ▸ Memory & CPU)"), now));
+                self.toast = Some((format!("Preview cut to {fit} of {n} frames: no more fit in the preview cache"), now));
                 ctx.request_repaint();
                 return;
             }
@@ -1000,7 +1025,8 @@ impl EffectcraftApp {
             return;
         }
         let step = plan.map_or(1, |p| p.step);
-        for k in 0..ahead * 3 {
+        let scan = if self.playback.playing { ahead * 3 } else { (ahead * 3).min(self.frames_that_fit(&c, scale)) };
+        for k in 0..scan {
             if queued >= ahead as usize || !video {
                 break;
             }
@@ -1009,6 +1035,7 @@ impl EffectcraftApp {
                     Some(f) => f,
                     None => break,
                 },
+                None if !self.playback.playing => Self::paused_preview_frame(cur, k, (wa, wb), self.ui.cache_when_idle),
                 None => {
                     let mut f = cur + k;
                     if f > wb {
@@ -1147,6 +1174,23 @@ impl EffectcraftApp {
         (left > 0.0).then_some(left)
     }
 
+    /// Paused prefetch and idle caching share a window that includes the displayed frame.
+    fn paused_preview_frame(cur: i64, k: i64, (wa, wb): (i64, i64), cache_when_idle: bool) -> i64 {
+        if k == 0 {
+            return cur;
+        }
+        // Idle frames belong to the work area; reserve the shown frame if it lies outside.
+        // Check the work area before clamping so an empty range cannot panic.
+        if cache_when_idle && wa <= wb && (cur < wa || cur > wb) {
+            return wa + (cur.clamp(wa, wb) - wa + k - 1).rem_euclid(wb - wa + 1);
+        }
+        let mut f = cur + k;
+        if f > wb {
+            f = wa + (f - wb - 1).rem_euclid((wb - wa + 1).max(1));
+        }
+        f
+    }
+
     /// Composition ▸ Preview ▸ Cache Frames When Idle: after a second without input or edits,
     /// render the work area's frames (from the current time on, then from its start) in the
     /// background, a few at a time, until it is cached or the RAM preview budget is full.
@@ -1168,14 +1212,15 @@ impl EffectcraftApp {
         if n < 1 {
             return;
         }
-        let cur = comp.frame_rate.frame_at(self.session.time()).clamp(wa, wb);
-        let fit = self.frames_that_fit(comp, series.scale as f64 / 1000.0).min(n);
+        let cur = comp.frame_rate.frame_at(self.session.time());
+        let outside = i64::from(cur < wa || cur > wb);
+        let fit = self.frames_that_fit(comp, series.scale as f64 / 1000.0).min(n.saturating_add(outside));
         let slots = (self.frames_parallelism() / 2).max(1);
         let mut queued = self.frames.inflight();
         let scale = series.scale as f64 / 1000.0;
         let mut pending = false;
         for k in 0..fit {
-            let f = wa + (cur - wa + k).rem_euclid(n);
+            let f = Self::paused_preview_frame(cur, k, (wa, wb), true);
             if self.frames.is_cached(&FrameKey { frame: f, ..*series }) {
                 continue;
             }
@@ -1191,19 +1236,18 @@ impl EffectcraftApp {
         }
     }
 
-    /// How many viewer frames of `comp` at `scale` the RAM preview budget holds (90 % of it,
-    /// at least one).
     /// The frames of `plan` from `cur` to its end, or as many as fit in the RAM preview, are
     /// cached: sound can play from `cur` in real time.
     fn cached_ahead(&self, plan: &effectcraft_engine::preview::PreviewPlan, series: &FrameKey, cur: i64, fit: i64) -> bool {
         let cached = self.frames.cached_frames(series);
-        (0..fit).map_while(|k| plan.frame_after(cur, k)).take_while(|f| *f >= cur).all(|f| cached.binary_search(&f).is_ok())
+        fit > 0 && (0..fit).map_while(|k| plan.frame_after(cur, k)).take_while(|f| *f >= cur).all(|f| cached.binary_search(&f).is_ok())
     }
 
     fn frames_that_fit(&self, comp: &effectcraft_engine::project::Comp, scale: f64) -> i64 {
-        let side = |n: u32| (n as f64 * scale).ceil().max(1.0);
-        let frame = side(comp.width) * side(comp.height) * 4.0;
-        ((self.frames.budget() as f64 * 0.9 / frame) as i64).max(1)
+        let gpu = self.gpu.is_some() && self.gpu_display() && self.session.project.settings.gpu_acceleration;
+        let roi = self.session.active_comp_id().and_then(|id| self.viewer_region(id));
+        let [width, height] = frames::preview_size(comp.width, comp.height, roi, scale);
+        self.frames.preview_capacity(width, height, 1.0, gpu)
     }
 
     fn frames_parallelism(&self) -> usize {
@@ -1403,6 +1447,11 @@ impl EffectcraftApp {
         if self.session.camera_job.is_some() || !self.session.camera_pending.is_empty() {
             self.session.poll_camera(true);
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // Read native keyboard zoom before applying a newly requested scale, which egui may
+        // defer until its next frame. A pending preference change takes priority.
+        if self.applied_prefs == Some(self.session.prefs_revision) {
+            prefs_live::ui_scale(self, &ctx);
         }
         self.apply_prefs(&ctx);
         self.handle_events(&ctx);

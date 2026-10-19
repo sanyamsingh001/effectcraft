@@ -204,6 +204,27 @@ fn square_to_quad(q: [[f64; 2]; 4]) -> M3 {
     effectcraft_geom::Mat3::square_to_quad([v(q[0]), v(q[1]), v(q[2]), v(q[3])]).0
 }
 
+/// The host composition camera in buffer coordinates, shared by cards and world particles.
+pub(crate) fn comp_projection(ctx: &EffectCtx, b: &Buf) -> Option<Proj> {
+    let [lw, lh] = ctx.layer_size;
+    let s = b.scale;
+    let c = [b.offset[0] + lw * 0.5 * s, b.offset[1] + lh * 0.5 * s];
+    let cam = ctx.env.host?.comp_scene()?.camera?;
+    // buffer world → layer: (p − offset) / s; layer → buffer: · s + offset.
+    let mut m = [[0.0; 4]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            m[i][j] = cam[i][j] / s;
+        }
+        m[i][3] = cam[i][3] - (cam[i][0] * b.offset[0] + cam[i][1] * b.offset[1]) / s;
+    }
+    let back: M3 = [[s, 0.0, b.offset[0]], [0.0, s, b.offset[1]], [0.0, 0.0, 1.0]];
+    let p = Proj { m, near: 1e-6 }.then(&back);
+    // W of the layer centre sets the scale of `near`.
+    let wc = p.m[2][0] * c[0] + p.m[2][1] * c[1] + p.m[2][3];
+    Some(Proj { near: (wc.abs() * 0.02).max(1e-9), ..p })
+}
+
 /// The camera an effect renders through, from its Camera System parameters.
 pub(crate) fn projection(ctx: &EffectCtx, b: &Buf) -> Proj {
     let pr = ctx.params;
@@ -235,24 +256,7 @@ pub(crate) fn projection(ctx: &EffectCtx, b: &Buf) -> Proj {
                 None => base,
             }
         }
-        2 => {
-            // Comp Camera: the comp's camera looking at this layer (layer px → layer px).
-            let base = Proj::simple(c, size * 2.0);
-            let Some(cam) = ctx.env.host.and_then(|h| h.comp_scene()).and_then(|sc| sc.camera) else { return base };
-            // buffer world → layer: (p − offset) / s; layer → buffer: · s + offset.
-            let mut m = [[0.0; 4]; 3];
-            for i in 0..3 {
-                for j in 0..3 {
-                    m[i][j] = cam[i][j] / s;
-                }
-                m[i][3] = cam[i][3] - (cam[i][0] * b.offset[0] + cam[i][1] * b.offset[1]) / s;
-            }
-            let back: M3 = [[s, 0.0, b.offset[0]], [0.0, s, b.offset[1]], [0.0, 0.0, 1.0]];
-            let p = Proj { m, near: 1e-6 }.then(&back);
-            // W of the layer centre sets the scale of `near`.
-            let wc = p.m[2][0] * c[0] + p.m[2][1] * c[1] + p.m[2][3];
-            Proj { near: (wc.abs() * 0.02).max(1e-9), ..p }
-        }
+        2 => comp_projection(ctx, b).unwrap_or_else(|| Proj::simple(c, size * 2.0)),
         _ => {
             let zpos = f("cameraPosition/cameraZ", 2.0).max(0.05);
             let focal = f("cameraPosition/focalLength", 70.0).max(1.0);

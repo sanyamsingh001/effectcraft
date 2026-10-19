@@ -17,6 +17,26 @@ pub fn frame(app: &mut EffectcraftApp, ctx: &egui::Context) {
     video_preview(app, ctx);
 }
 
+/// egui's native keyboard zoom uses the same stored setting as the Settings control.
+pub(crate) fn ui_scale(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let native = ctx.zoom_factor();
+    let scale = if native.is_finite() { native.clamp(0.75, 2.0) } else { 1.0 };
+    if native != scale {
+        ctx.set_zoom_factor(scale);
+    }
+    if scale != app.session.prefs.appearance.ui_scale as f32 {
+        if let Err(error) = app.session.prefs.set("appearance.uiScale", json!(scale)) {
+            app.ui.status = error;
+        } else {
+            app.session.prefs_changed();
+            // Settings edits stay live until OK, including while an Info dialog is open.
+            if app.dialog_state.prefs_snapshot.is_none() {
+                app.session.save_prefs();
+            }
+        }
+    }
+}
+
 /// Files dropped on the window are imported (layered files as Default Drag Import As says) in
 /// the background, with the Importing card showing what is read (#270). Dropped on the
 /// Composition viewer, they also become layers centred there, as in After Effects (#85), when the

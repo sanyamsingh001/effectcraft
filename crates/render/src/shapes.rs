@@ -639,6 +639,31 @@ pub fn stroke_region(paths: &[BezPath], style: &StrokeStyle) -> Option<BezPath> 
     (!r.elements().is_empty()).then_some(r)
 }
 
+/// Painted geometry for snapping, excluding the conservative raster allocation margin.
+/// Stroke widths follow their group transforms, as in coverage rendering.
+pub fn snap_bounds(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup) -> Option<kurbo::Rect> {
+    let mut arena = Vec::new();
+    let (draws, _) = collect(ctx, layer, contents, &mut arena);
+    draws
+        .iter()
+        .filter_map(|d| {
+            let paths: Vec<BezPath> = d.slots.iter().map(|&i| arena[i].clone()).filter(|p| !p.elements().is_empty()).collect();
+            let stroke = match &d.paint {
+                Paint::Stroke { style, .. } | Paint::Gradient { stroke: Some(style), .. } => Some(style),
+                _ => None,
+            };
+            if let Some(style) = stroke {
+                let mut style = style.clone();
+                style.width *= d.xf.mean_scale();
+                let outline = effectcraft_path::stroke_outline(&paths, &style, 1.0)?;
+                effectcraft_path::bounds(std::slice::from_ref(&outline))
+            } else {
+                effectcraft_path::bounds(&paths)
+            }
+        })
+        .reduce(|a, b| a.union(b))
+}
+
 /// Layer-space bounds of a shape layer's painted contents (strokes included), without
 /// rasterising.
 pub fn content_bounds(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup) -> Option<kurbo::Rect> {

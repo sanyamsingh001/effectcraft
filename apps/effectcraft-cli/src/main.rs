@@ -16,6 +16,8 @@
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
 //!     [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
 //!     (a relative --out is relative to the working directory; --queue outputs follow the project's own settings)
+//! effectcraft-cli render --template T.ectemplate [--values V.json] --out FILE
+//! effectcraft-cli render-frame --template T.ectemplate [--values V.json] [--time S] [--out F.png]
 //! effectcraft-cli render F.ecproj --queue                    render the project's Render Queue
 //! effectcraft-cli bench [--comp C] [--time S] [--scale K] [--n N] [--play N] [--gpu [--adv3d]]   render timings
 //!     (--gpu: CPU vs GPU ms/frame for every comp at Full and Half)
@@ -38,6 +40,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use std::io::Write;
+
+mod template;
 
 use effectcraft_automation::tools::{self, Reply};
 use effectcraft_automation::{Backend, McpServer};
@@ -102,6 +106,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff;
                                            --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
                                            a relative --out is relative to the working directory
+  render/render-frame --template T.ectemplate [--values V.json]   render one template instance
   bench [--comp C] [--time S] [--scale K] [--n N] [--play N] [--gpu [--adv3d]]   per-layer/effect render timings;
                                            --play N renders N consecutive frames with/without the layer cache;
                                            --gpu compares CPU and GPU ms/frame for every comp at Full and Half
@@ -137,6 +142,8 @@ const VALUED: &[&str] = &[
     "--depth",
     "--eval",
     // render
+    "--template",
+    "--values",
     "--format",
     "--start",
     "--end",
@@ -419,6 +426,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
     if args.flag("--autosave") && cmd != "mcp" {
         return usage_err("--autosave is only supported by mcp");
     }
+    template::validate(cmd, args)?;
     match cmd {
         "render" => render(args, json_out)?,
         "bench" => bench_cmd(args)?,
@@ -550,7 +558,13 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             emit(&with_saved(v, saved), json_out);
         }
         "render-frame" | "frame" => {
-            let mut b = backend(args, true)?;
+            let mut b = if args.opt("--template").is_some() {
+                let mut s = session(args)?;
+                template::prepare(&mut s, args)?;
+                Backend::headless(s)
+            } else {
+                backend(args, true)?
+            };
             let comp = args.opt("--comp").and_then(reference);
             let mut time = args.num("--time")?;
             let mut max_side = args.num("--max-side")?.map(|m| m as u32).unwrap_or(0);
@@ -629,10 +643,14 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
         return usage_err("render runs headless; use `exec renderQueue.add` / `renderQueue.render` with --bridge");
     }
     let mut s = session(args)?;
-    match &args.project {
-        Some(p) => s.execute("file.open", json!({"path": p})).map_err(|e| Failure::Error(e.to_string()))?,
-        None => s.execute("file.openDemoProject", json!({})).map_err(|e| Failure::Error(e.to_string()))?,
-    };
+    if args.opt("--template").is_some() {
+        template::prepare(&mut s, args)?;
+    } else {
+        match &args.project {
+            Some(p) => s.execute("file.open", json!({"path": p})).map_err(|e| Failure::Error(e.to_string()))?,
+            None => s.execute("file.openDemoProject", json!({})).map_err(|e| Failure::Error(e.to_string()))?,
+        };
+    }
     let err = |e: effectcraft_engine::EngineError| Failure::Error(e.to_string());
     if !args.flag("--queue") {
         let Some(out) = args.opt("--out") else { return usage_err("render: --out FILE is required (or --queue)") };

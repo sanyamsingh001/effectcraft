@@ -493,13 +493,15 @@ pub(crate) fn layers_p(s: &Session, p: &Value) -> Result<(ItemId, Vec<LayerId>)>
     // Explicit references that match no layer are an error (agents otherwise get a silent no-op).
     let resolve =
         |v: &Value| resolve_layer(comp, v).ok_or_else(|| EngineError::Other(format!("no layer {v} (use a layer id, \"#n\" or a name from comp.info)")));
-    if let Some(Value::Array(a)) = p.get("layers") {
-        return Ok((cid, a.iter().map(resolve).collect::<Result<_>>()?));
-    }
-    if let Some(v) = p.get("layer").filter(|v| !v.is_null()) {
-        return Ok((cid, vec![resolve(v)?]));
-    }
-    Ok((cid, s.state.selected_layers.iter().copied().filter(|l| comp.layer(*l).is_some()).collect()))
+    let ids: Vec<LayerId> = if let Some(Value::Array(a)) = p.get("layers") {
+        a.iter().map(resolve).collect::<Result<_>>()?
+    } else if let Some(v) = p.get("layer").filter(|v| !v.is_null()) {
+        vec![resolve(v)?]
+    } else {
+        s.state.selected_layers.iter().copied().filter(|l| comp.layer(*l).is_some()).collect()
+    };
+    let mut seen = std::collections::HashSet::new();
+    Ok((cid, ids.into_iter().filter(|id| seen.insert(*id)).collect()))
 }
 
 /// Whether a layer can be picked by the user (Select All, Ctrl+Up/Down, a Timeline click): not

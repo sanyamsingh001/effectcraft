@@ -160,7 +160,7 @@ fn prop_row(
     let cy = r.center().y;
     let uid = prop.uid;
     let swr = Rect::from_center_size(pos2(r.min.x + indent, cy), vec2(14.0, 14.0));
-    if !prop.static_only && !matches!(prop.ui, ParamUi::Hidden) {
+    if !prop.static_only && (!matches!(prop.ui, ParamUi::Hidden) || super::fx_editors::is_mesh_prop(layer, prop)) {
         let resp = ui.interact(swr, egui::Id::new(("ec-sw", uid)), Sense::click());
         icons::paint(
             p,
@@ -325,6 +325,31 @@ fn prop_row(
                 set(actions, json!([rgb[0], rgb[1], rgb[2], 1.0]));
             }
         }
+        Value::Str(name) if group.match_id == "ec.3d.extractor" && matches!(prop.match_id.as_str(), "red" | "green" | "blue" | "alpha") => {
+            let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((r.max.x - vx - 8.0).clamp(80.0, 200.0), 18.0));
+            let pop = egui::Id::new(("ec-channel-pop", uid));
+            if widgets::dropdown(ui, dr, if name.is_empty() { "None" } else { name }, &t, egui::Id::new(("ec-channel", uid))).clicked() {
+                widgets::open_popup(ui, pop);
+            }
+            app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
+            if widgets::popup_is_open(ui, pop) {
+                let options = extractor_channels(app, layer, ectx, name);
+                let labels: Vec<String> = options
+                    .iter()
+                    .map(|n| match n.as_str() {
+                        "" => "None".into(),
+                        "-" | "None" => format!("{n} (channel)"),
+                        _ => n.clone(),
+                    })
+                    .collect();
+                let selected = options.iter().position(|n| n == name);
+                if let Some(n) = widgets::popup_menu(ui, pop, dr.left_bottom(), &labels, selected)
+                    && let Some(channel) = options.get(n)
+                {
+                    set(actions, json!(channel));
+                }
+            }
+        }
         Value::Bool(b) => {
             let cr = Rect::from_min_size(pos2(vx, cy - 8.0), vec2(16.0, 16.0));
             if widgets::checkbox(ui, cr, *b, &t, egui::Id::new(("ec-b", uid))).clicked() {
@@ -393,8 +418,34 @@ fn prop_row(
             p.rect_stroke(gr, 2.0, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
             app.auto.add(&format!("effectControls.prop.{uid}.value"), gr, &prop.name);
         }
+        Value::Str(_) if super::fx_editors::is_mesh_prop(layer, prop) => {
+            super::fx_editors::mesh_row(app, ui, p, layer, group, prop, r, vx, actions);
+        }
         _ => {}
     }
+}
+
+/// EXtractoR keeps channel names as strings so imported projects and agent commands can use
+/// every EXR channel. Read auxiliary metadata only while a channel menu is open.
+fn extractor_channels(app: &EffectcraftApp, layer: &Layer, ectx: &EvalCtx, current: &str) -> Vec<String> {
+    use effectcraft_engine::project::{ItemKind, LayerSource};
+    let mut options: Vec<String> = ["", "R", "G", "B", "A"].into_iter().map(str::to_string).collect();
+    if let LayerSource::Footage { item } = &layer.source
+        && let Some(ItemKind::Footage(footage)) = app.session.project.item(*item).map(|i| &i.kind)
+        && let Some(aux) = app.session.footage.aux(*item, footage, ectx.source_time(layer))
+    {
+        let mut channels: Vec<String> = aux.names().into_iter().map(str::to_string).collect();
+        channels.sort();
+        for channel in channels {
+            if !options.iter().any(|n| n.eq_ignore_ascii_case(&channel)) {
+                options.push(channel);
+            }
+        }
+    }
+    if !options.iter().any(|n| n == current) {
+        options.push(current.into());
+    }
+    options
 }
 
 /// How many of a vector parameter's values show (a 3D point's Z only on a 3D layer).
@@ -529,7 +580,10 @@ fn group_rows(
         let r = Rect::from_min_size(pos2(rect.min.x, *y), vec2(rect.width(), ROW));
         match c {
             Node::Prop(pr) => {
-                if matches!(pr.ui, ParamUi::Hidden) || pr.three_d_only && !layer.is_3d() || !fx.shown(layer, ectx, &pr.match_id) {
+                if matches!(pr.ui, ParamUi::Hidden) && !super::fx_editors::is_mesh_prop(layer, pr)
+                    || pr.three_d_only && !layer.is_3d()
+                    || !fx.shown(layer, ectx, &pr.match_id)
+                {
                     continue;
                 }
                 *y += ROW;
@@ -1213,6 +1267,9 @@ pub fn viewer_hook(
             for g in fx.groups().filter(|g| g.enabled && sel.iter().any(|(l, u)| *l == layer.id && *u == g.uid)) {
                 if matches!(&g.kind, GroupKind::Effect { effect } if effect == super::fx_editors::RESHAPE) {
                     super::fx_editors::reshape_overlay(app, ui, painter, map, ectx, layer, g, &m, &mut actions);
+                }
+                if matches!(&g.kind, GroupKind::Effect { effect } if effect == super::fx_editors::MESH_WARP) {
+                    super::fx_editors::mesh_overlay(app, ui, painter, map, ectx, layer, g, &m, &mut actions);
                 }
                 let pts: Vec<&Property> = g.props().filter(|p| matches!(p.ui, ParamUi::Point)).collect();
                 let screen: Vec<egui::Pos2> = pts

@@ -6,17 +6,16 @@
 //! and matching source points is split into triangles, bucketed per output row and filled
 //! row-parallel with inverse barycentric sampling.
 //!
-//! Mesh Warp's distortion mesh is stored in the hidden string parameter `mesh`: whitespace (or
-//! `;`) separated `dx,dy` pairs, row-major over the (rows+1)×(columns+1) vertices, giving each
-//! vertex's offset in layer pixels. An empty string (or one with the wrong count) is the
-//! undistorted mesh.
+//! Mesh Warp stores vertex offsets and four Bezier tangent adjustments in `mesh`. The viewer
+//! edits the same bounded mesh the renderer samples. Legacy `dx,dy` strings remain readable.
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use effectcraft_color::{BlendMode, blend_pixel};
-use effectcraft_keyframe::Value;
-use effectcraft_project::ParamUi;
+use effectcraft_keyframe::{Keyframe, ShapePath, Value};
+use effectcraft_project::{ParamUi, Property};
 use effectcraft_raster::{Image, Px};
+use effectcraft_time::Tick;
 use rayon::prelude::*;
 
 use crate::generate::value_noise;
@@ -398,6 +397,50 @@ const MAGNIFY_MODE_NAMES: [&str; 18] = [
 
 type Pt = (f64, f64);
 
+// At most 16 MiB of indices for the supported grids, independent of output height or
+// distorted triangle size. Small grids use up to 64 bins to keep row traversal cheap.
+const GRID_BIN_INDEX_BUDGET: usize = 2 * 1024 * 1024;
+
+struct GridBins {
+    rows_per_bin: usize,
+    bins: Vec<Vec<usize>>,
+    triangle_rows: Vec<std::ops::Range<usize>>,
+}
+
+fn grid_bins(triangles: &[[usize; 3]], dest: &[Pt], height: usize) -> GridBins {
+    let max_bins = (GRID_BIN_INDEX_BUDGET / triangles.len().max(1)).clamp(1, 64);
+    let rows_per_bin = height.div_ceil(max_bins).max(1);
+    let bin_count = height.div_ceil(rows_per_bin);
+    let triangle_rows: Vec<_> = triangles
+        .iter()
+        .map(|tri| {
+            let ys = tri.map(|k| dest[k].1);
+            let first = ((ys[0].min(ys[1]).min(ys[2]) - 0.5).floor().max(0.0) as usize).min(height);
+            let end = ((ys[0].max(ys[1]).max(ys[2]) + 0.5).ceil().max(0.0) as usize).min(height);
+            first..end
+        })
+        .collect();
+    let bins_for = |rows: &std::ops::Range<usize>| {
+        let first = rows.start / rows_per_bin;
+        let end = if rows.is_empty() { first } else { (rows.end - 1) / rows_per_bin + 1 };
+        first..end
+    };
+    // Count first so every bin has exact capacity rather than growing to twice its size.
+    let mut counts = vec![0; bin_count];
+    for rows in &triangle_rows {
+        for bin in bins_for(rows) {
+            counts[bin] += 1;
+        }
+    }
+    let mut bins: Vec<Vec<usize>> = counts.into_iter().map(Vec::with_capacity).collect();
+    for (t, rows) in triangle_rows.iter().enumerate() {
+        for bin in bins_for(rows) {
+            bins[bin].push(t);
+        }
+    }
+    GridBins { rows_per_bin, bins, triangle_rows }
+}
+
 /// Warp `src` into a `w`×`h` image: grid point `i` (row-major, (nx+1)×(ny+1)) at `dest[i]` shows
 /// the source at `srcp[i]`. Uncovered pixels are transparent.
 fn grid_warp(src: &Image, w: u32, h: u32, nx: usize, ny: usize, dest: &[Pt], srcp: &[Pt]) -> Image {
@@ -410,24 +453,18 @@ fn grid_warp(src: &Image, w: u32, h: u32, nx: usize, ny: usize, dest: &[Pt], src
             tris.push([a, c, d]);
         }
     }
-    let hh = h as usize;
-    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); hh];
-    for (t, tri) in tris.iter().enumerate() {
-        let ys = tri.map(|k| dest[k].1);
-        let y0 = (ys[0].min(ys[1]).min(ys[2]) - 0.5).floor().max(0.0) as usize;
-        let y1 = (ys[0].max(ys[1]).max(ys[2]) + 0.5).ceil().max(0.0) as usize;
-        for y in y0..y1.min(hh) {
-            buckets[y].push(t);
-        }
-    }
+    let bins = grid_bins(&tris, dest, h as usize);
     let mut out = Image::new(w, h);
     out.rows_mut().for_each(|(y, row)| {
         let py = y as f64 + 0.5;
-        for &t in &buckets[y] {
+        for &t in &bins.bins[y / bins.rows_per_bin] {
+            if !bins.triangle_rows[t].contains(&y) {
+                continue;
+            }
             let [ia, ib, ic] = tris[t];
             let (a, bb, c) = (dest[ia], dest[ib], dest[ic]);
             let den = (bb.1 - c.1) * (a.0 - c.0) + (c.0 - bb.0) * (a.1 - c.1);
-            if den.abs() < 1e-12 {
+            if !den.is_finite() || den.abs() < 1e-12 {
                 continue;
             }
             let x0 = (a.0.min(bb.0).min(c.0) - 0.5).floor().max(0.0) as usize;
@@ -441,7 +478,7 @@ fn grid_warp(src: &Image, w: u32, h: u32, nx: usize, ny: usize, dest: &[Pt], src
                 let l2 = ((c.1 - a.1) * (px - c.0) + (a.0 - c.0) * (py - c.1)) / den;
                 let l3 = 1.0 - l1 - l2;
                 let e = -1e-9;
-                if l1 < e || l2 < e || l3 < e {
+                if !(l1 >= e && l2 >= e && l3 >= e) {
                     continue;
                 }
                 let (sa, sb, sc) = (srcp[ia], srcp[ib], srcp[ic]);
@@ -458,40 +495,214 @@ fn grid_warp(src: &Image, w: u32, h: u32, nx: usize, ny: usize, dest: &[Pt], src
 pub fn parse_mesh(s: &str) -> Vec<(f64, f64)> {
     s.split(|c: char| c.is_whitespace() || c == ';')
         .filter(|t| !t.is_empty())
+        .take(1025)
         .filter_map(|t| {
             let mut it = t.split(',');
             let x = it.next()?.trim().parse::<f64>().ok()?;
             let y = it.next()?.trim().parse::<f64>().ok()?;
-            Some((x, y))
+            (x.is_finite() && y.is_finite()).then_some((x, y))
         })
         .collect()
 }
 
+/// A distortion mesh in layer pixels. Each vertex carries its offset followed by adjustments
+/// to the straight left, right, top and bottom tangents. Counts are bounded to 32 × 32 vertices.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WarpMesh {
+    pub rows: usize,
+    pub columns: usize,
+    pub controls: Vec<[[f64; 2]; 5]>,
+}
+
+impl WarpMesh {
+    pub fn dimension(n: f64) -> usize {
+        if n.is_finite() { n.round().clamp(1.0, 31.0) as usize } else { 7 }
+    }
+
+    pub fn identity(rows: usize, columns: usize) -> Self {
+        let (rows, columns) = (rows.clamp(1, 31), columns.clamp(1, 31));
+        Self { rows, columns, controls: vec![[[0.0; 2]; 5]; (rows + 1) * (columns + 1)] }
+    }
+
+    /// Read versioned data, or an old row-major offset list. Invalid data repairs to identity;
+    /// parsing never allocates more than the maximum vertex count.
+    pub fn parse(s: &str, rows: usize, columns: usize) -> Self {
+        let mut out = Self::identity(rows, columns);
+        let Some(rest) = s.strip_prefix("mw1;") else {
+            let offsets = parse_mesh(s);
+            if offsets.len() == out.controls.len() {
+                for (v, (x, y)) in out.controls.iter_mut().zip(offsets) {
+                    v[0] = [x, y];
+                }
+            }
+            return out;
+        };
+        let Some((header, data)) = rest.split_once(';') else { return out };
+        let Some((r, c)) = header.split_once(',') else { return out };
+        let (Ok(r), Ok(c)) = (r.parse::<usize>(), c.parse::<usize>()) else { return out };
+        if !(1..=31).contains(&r) || !(1..=31).contains(&c) {
+            return out;
+        }
+        let mut original = Self::identity(r, c);
+        let mut tokens = data.split_whitespace();
+        for vertex in &mut original.controls {
+            let Some(token) = tokens.next() else { return out };
+            let mut numbers = token.split(',');
+            for control in vertex {
+                for value in control {
+                    let Some(number) = numbers.next().and_then(|n| n.parse::<f64>().ok()).filter(|n| n.is_finite()) else { return out };
+                    *value = number;
+                }
+            }
+            if numbers.next().is_some() {
+                return out;
+            }
+        }
+        if tokens.next().is_some() {
+            return out;
+        }
+        if (r, c) == (out.rows, out.columns) {
+            return original;
+        }
+        // Changing Rows / Columns preserves the offset field instead of silently discarding it.
+        for j in 0..=out.rows {
+            for i in 0..=out.columns {
+                let x = i as f64 / out.columns as f64 * c as f64;
+                let y = j as f64 / out.rows as f64 * r as f64;
+                let (ci, cj) = ((x.floor() as usize).min(c - 1), (y.floor() as usize).min(r - 1));
+                let (u, v) = (x - ci as f64, y - cj as f64);
+                if let Some(dst) = out.controls.get_mut(j * (out.columns + 1) + i) {
+                    for (di, dj, weight) in [(0, 0, (1.0 - u) * (1.0 - v)), (1, 0, u * (1.0 - v)), (0, 1, (1.0 - u) * v), (1, 1, u * v)] {
+                        if let Some(src) = original.controls.get((cj + dj) * (c + 1) + ci + di) {
+                            for (to, from) in dst.iter_mut().zip(src) {
+                                for (a, b) in to.iter_mut().zip(from) {
+                                    *a += b * weight;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn format(&self) -> String {
+        let mut text = format!("mw1;{},{};", self.rows, self.columns);
+        for vertex in &self.controls {
+            if !text.ends_with(';') {
+                text.push(' ');
+            }
+            text.push_str(&vertex.iter().flat_map(|p| p.iter()).map(f64::to_string).collect::<Vec<_>>().join(","));
+        }
+        text
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.controls.iter().flatten().flatten().all(|n| *n == 0.0)
+    }
+
+    /// 0 is the vertex; 1–4 are left, right, top and bottom. Boundary vertices have only
+    /// the tangent handles which lead to another vertex.
+    pub fn point(&self, index: usize, part: usize, size: [f64; 2]) -> Option<[f64; 2]> {
+        if !(1..=31).contains(&self.rows) || !(1..=31).contains(&self.columns) {
+            return None;
+        }
+        let vertex = self.controls.get(index)?;
+        let (i, j) = (index % (self.columns + 1), index / (self.columns + 1));
+        let position = [i as f64 / self.columns as f64 * size[0] + vertex[0][0], j as f64 / self.rows as f64 * size[1] + vertex[0][1]];
+        if part == 0 {
+            return Some(position);
+        }
+        let neighbor = match part {
+            1 if i > 0 => index.checked_sub(1)?,
+            2 if i < self.columns => index.checked_add(1)?,
+            3 if j > 0 => index.checked_sub(self.columns + 1)?,
+            4 if j < self.rows => index.checked_add(self.columns + 1)?,
+            _ => return None,
+        };
+        let next = self.point(neighbor, 0, size)?;
+        let adjustment = vertex.get(part)?;
+        Some([position[0] + (next[0] - position[0]) / 3.0 + adjustment[0], position[1] + (next[1] - position[1]) / 3.0 + adjustment[1]])
+    }
+
+    /// Coons patch through the four Bezier edges of a cell, at normalized layer u/v.
+    pub fn sample(&self, u: f64, v: f64, size: [f64; 2]) -> [f64; 2] {
+        if !(1..=31).contains(&self.rows) || !(1..=31).contains(&self.columns) {
+            return [0.0; 2];
+        }
+        let (x, y) = (u.clamp(0.0, 1.0) * self.columns as f64, v.clamp(0.0, 1.0) * self.rows as f64);
+        let (i, j) = ((x.floor() as usize).min(self.columns - 1), (y.floor() as usize).min(self.rows - 1));
+        let (u, v) = (x - i as f64, y - j as f64);
+        let index = j * (self.columns + 1) + i;
+        let (tl, tr, bl, br) = (index, index + 1, index + self.columns + 1, index + self.columns + 2);
+        let at = |n, p| self.point(n, p, size).unwrap_or([0.0; 2]);
+        let c0 = bez(at(tl, 0), at(tl, 2), at(tr, 1), at(tr, 0), u);
+        let c1 = bez(at(bl, 0), at(bl, 2), at(br, 1), at(br, 0), u);
+        let d0 = bez(at(tl, 0), at(tl, 4), at(bl, 3), at(bl, 0), v);
+        let d1 = bez(at(tr, 0), at(tr, 4), at(br, 3), at(br, 0), v);
+        let (tl, tr, bl, br) = (at(tl, 0), at(tr, 0), at(bl, 0), at(br, 0));
+        [0, 1].map(|k| {
+            let bil = tl[k] * (1.0 - u) * (1.0 - v) + tr[k] * u * (1.0 - v) + bl[k] * (1.0 - u) * v + br[k] * u * v;
+            c0[k] * (1.0 - v) + c1[k] * v + d0[k] * (1.0 - u) + d1[k] * u - bil
+        })
+    }
+}
+
+/// Evaluate only the segment and its neighbors, using the existing path interpolation and
+/// temporal easing rules for the mesh's numeric control pairs. Storage stays legacy-compatible.
+pub fn mesh_value(prop: &Property, rows: usize, columns: usize, time: Tick) -> Value {
+    let keys = &prop.keys;
+    if keys.len() < 2 || keys.first().is_none_or(|k| time <= k.time) || keys.last().is_none_or(|k| time >= k.time) {
+        return prop.value_at(time);
+    }
+    let i = keys.partition_point(|k| k.time <= time).saturating_sub(1);
+    let start = i.saturating_sub(1);
+    let end = i.saturating_add(3).min(keys.len());
+    let Some(segment) = keys.get(start..end) else { return prop.value_at(time) };
+    let transformed: Vec<Keyframe> = segment
+        .iter()
+        .map(|key| {
+            let text = match &key.value {
+                Value::Str(s) => s.as_str(),
+                _ => "",
+            };
+            let mesh = WarpMesh::parse(text, rows, columns);
+            let pairs: Vec<[f64; 2]> = mesh.controls.iter().flat_map(|p| p.iter().copied()).collect();
+            let mut key = key.clone();
+            key.value = Value::Path(ShapePath::polygon(&pairs, false));
+            key
+        })
+        .collect();
+    let Some(Value::Path(path)) = effectcraft_keyframe::evaluate(&transformed, time, false) else { return prop.value_at(time) };
+    let mut mesh = WarpMesh::identity(rows, columns);
+    for (vertex, pairs) in mesh.controls.iter_mut().zip(path.vertices.as_chunks::<5>().0) {
+        for (to, from) in vertex.iter_mut().zip(pairs) {
+            *to = *from;
+        }
+    }
+    Value::Str(mesh.format())
+}
+
 fn mesh_warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let rows = ctx.params.f("rows").round().clamp(1.0, 31.0) as usize;
-    let cols = ctx.params.f("columns").round().clamp(1.0, 31.0) as usize;
-    let q = ctx.params.f("quality").round().clamp(1.0, 10.0) as usize;
-    let offs = parse_mesh(ctx.params.s("mesh"));
-    if offs.len() != (rows + 1) * (cols + 1) || offs.iter().all(|o| o.0 == 0.0 && o.1 == 0.0) {
+    let rows = WarpMesh::dimension(ctx.params.f("rows"));
+    let cols = WarpMesh::dimension(ctx.params.f("columns"));
+    // Three subdivisions resolve cubic edges even when opposing tangents cancel at their midpoint.
+    let q = WarpMesh::dimension(ctx.params.f("quality")).clamp(3, 10);
+    let mesh = WarpMesh::parse(ctx.params.s("mesh"), rows, cols);
+    if mesh.is_identity() {
         return b;
     }
     let (lw, lh) = (ctx.layer_size[0], ctx.layer_size[1]);
-    let vert = |i: usize, j: usize| {
-        let o = offs[j * (cols + 1) + i];
-        b.to_px([i as f64 / cols as f64 * lw + o.0, j as f64 / rows as f64 * lh + o.1])
-    };
     let (nx, ny) = (cols * q, rows * q);
     let mut dest = Vec::with_capacity((nx + 1) * (ny + 1));
     let mut srcp = Vec::with_capacity((nx + 1) * (ny + 1));
     for gj in 0..=ny {
         for gi in 0..=nx {
-            let (ci, cj) = ((gi / q).min(cols - 1), (gj / q).min(rows - 1));
-            let (u, v) = ((gi - ci * q) as f64 / q as f64, (gj - cj * q) as f64 / q as f64);
-            let (p00, p10, p01, p11) = (vert(ci, cj), vert(ci + 1, cj), vert(ci, cj + 1), vert(ci + 1, cj + 1));
-            let x = (p00.0 * (1.0 - u) + p10.0 * u) * (1.0 - v) + (p01.0 * (1.0 - u) + p11.0 * u) * v;
-            let y = (p00.1 * (1.0 - u) + p10.1 * u) * (1.0 - v) + (p01.1 * (1.0 - u) + p11.1 * u) * v;
-            dest.push((x, y));
-            srcp.push(b.to_px([gi as f64 / nx as f64 * lw, gj as f64 / ny as f64 * lh]));
+            let dest_point = mesh.sample(gi as f64 / nx as f64, gj as f64 / ny as f64, [lw, lh]);
+            let origin = ctx.env.bounds_origin;
+            dest.push(b.to_px([dest_point[0] + origin[0], dest_point[1] + origin[1]]));
+            srcp.push(b.to_px([gi as f64 / nx as f64 * lw + origin[0], gj as f64 / ny as f64 * lh + origin[1]]));
         }
     }
     b.img = grid_warp(&b.img, b.img.width, b.img.height, nx, ny, &dest, &srcp);
@@ -795,7 +1006,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("rows", "Rows", num(7.0), slider(1.0, 31.0, 1.0, 31.0, 0)),
                 p("columns", "Columns", num(7.0), slider(1.0, 31.0, 1.0, 31.0, 0)),
                 p("quality", "Quality", num(8.0), slider(1.0, 10.0, 1.0, 10.0, 0)),
-                p("mesh", "Distortion Mesh", Value::Str(String::new()), ParamUi::Hidden),
+                p("mesh", "Distortion Mesh", Value::Str(String::new()), ParamUi::Text),
             ],
             mesh_warp,
         ),
@@ -935,6 +1146,48 @@ mod tests {
     }
 
     #[test]
+    fn grid_bins_bound_pathological_mesh_indexing() {
+        // All maximum-grid triangles span the whole image: the previous per-row index
+        // would allocate over 23 GiB at the largest height, before the output pixels themselves.
+        let triangles = vec![[0, 1, 2]; 31 * 31 * 10 * 10 * 2];
+        let dest = [(0.0, -1e6), (1.0, 1e6), (2.0, -1e6)];
+        for height in [0, 1, 2160, 16384] {
+            let bins = grid_bins(&triangles, &dest, height);
+            let entries: usize = bins.bins.iter().map(Vec::len).sum();
+            assert!(entries <= GRID_BIN_INDEX_BUDGET, "{height}: {entries} entries");
+            assert_eq!(bins.bins.iter().map(Vec::capacity).sum::<usize>(), entries);
+            if height != 0 {
+                for row in [0, height / 2, height - 1] {
+                    assert_eq!(bins.bins[row / bins.rows_per_bin].len(), triangles.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grid_bins_preserve_row_candidates_and_triangle_order() {
+        let dest = [(0.0, -2.0), (1.0, 1.0), (2.0, 10.0), (3.0, 66.0), (4.0, 100.0), (5.0, 200.0), (6.0, 201.0)];
+        let triangles = [[0, 1, 2], [1, 2, 3], [2, 3, 4], [4, 5, 6], [5, 6, 5], [0, 0, 1]];
+        let height = 123;
+        let bins = grid_bins(&triangles, &dest, height);
+        assert!(bins.rows_per_bin > 1, "exercise coarsening");
+        for row in 0..height {
+            let expected: Vec<_> = triangles
+                .iter()
+                .enumerate()
+                .filter_map(|(t, tri)| {
+                    let ys = tri.map(|k| dest[k].1);
+                    let first = (ys[0].min(ys[1]).min(ys[2]) - 0.5).floor().max(0.0) as usize;
+                    let end = ((ys[0].max(ys[1]).max(ys[2]) + 0.5).ceil().max(0.0) as usize).min(height);
+                    (first..end).contains(&row).then_some(t)
+                })
+                .collect();
+            let actual: Vec<_> = bins.bins[row / bins.rows_per_bin].iter().copied().filter(|t| bins.triangle_rows[*t].contains(&row)).collect();
+            assert_eq!(actual, expected, "row {row}: raster traversal is unchanged");
+        }
+    }
+
+    #[test]
     fn mesh_warp_empty_and_zero_are_identity() {
         let img = test_img(32, 24);
         assert_eq!(run("ec.distort.meshwarp", &[], img.clone()).img, img);
@@ -954,6 +1207,91 @@ mod tests {
             }
         }
         assert!(o.img.get(1, 10)[3] < 1e-6);
+    }
+
+    #[test]
+    fn mesh_warp_centered_layer_uses_the_same_bounds_as_the_viewer() {
+        let img = test_img(32, 24);
+        let spec = crate::find("ec.distort.meshwarp").unwrap();
+        let mut params = Params { values: spec.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        let mesh = vec!["4,0"; 64].join(" ");
+        params.values.insert("mesh".into(), Value::Str(mesh.clone()));
+        let env = crate::EffectEnv { bounds_origin: [-16.0, -12.0], ..Default::default() };
+        let ctx = EffectCtx { params: &params, time: 0.5, layer_size: [32.0, 24.0], seed: 3, adjustment: false, env };
+        let centered = crate::apply(spec, &ctx, Buf { img: img.clone(), offset: [16.0, 12.0], scale: 1.0 });
+        let regular = run("ec.distort.meshwarp", &[("mesh", Value::Str(mesh))], img);
+        assert!(max_diff(&centered.img, &regular.img) < 1e-5);
+    }
+
+    #[test]
+    fn mesh_warp_tangents_curve_the_grid_and_image() {
+        let mut mesh = WarpMesh::identity(1, 1);
+        mesh.controls[0][2] = [0.0, 12.0];
+        assert_eq!(mesh.point(0, 1, [32.0, 24.0]), None);
+        let middle = mesh.sample(0.5, 0.0, [32.0, 24.0]);
+        assert!((middle[0] - 16.0).abs() < 1e-10 && (middle[1] - 4.5).abs() < 1e-10);
+        assert_eq!(WarpMesh::parse(&mesh.format(), 1, 1), mesh);
+        let img = test_img(32, 24);
+        for quality in [1.0, 8.0] {
+            let out = run(
+                "ec.distort.meshwarp",
+                &[("rows", num(1.0)), ("columns", num(1.0)), ("quality", num(quality)), ("mesh", Value::Str(mesh.format()))],
+                img.clone(),
+            );
+            assert!(out.img.get(16, 1)[3] < 1e-6, "Quality {quality}: the bent top edge must reveal transparency");
+            assert!(max_diff(&out.img, &img) > 0.1);
+        }
+        // Opposing tangent adjustments cancel at t=0, 0.5 and 1. Sampling only those
+        // positions loses this S-curve completely; Quality 1 must still show its deformation.
+        mesh.controls[1][1] = [0.0, -12.0];
+        assert!(mesh.sample(0.5, 0.0, [32.0, 24.0])[1].abs() < 1e-10);
+        assert!(mesh.sample(1.0 / 3.0, 0.0, [32.0, 24.0])[1] > 2.0);
+        for quality in [1.0, 8.0] {
+            let out = run(
+                "ec.distort.meshwarp",
+                &[("rows", num(1.0)), ("columns", num(1.0)), ("quality", num(quality)), ("mesh", Value::Str(mesh.format()))],
+                img.clone(),
+            );
+            assert!(out.img.get(10, 1)[3] < 1e-6, "Quality {quality}: opposing tangents must curve the top edge");
+            assert!(max_diff(&out.img, &img) > 0.1);
+        }
+    }
+
+    #[test]
+    fn mesh_warp_malformed_data_is_bounded_and_repairs_to_identity() {
+        for text in ["mw1;99999999999999999999,1;", "mw1;0,0;", "mw1;1,1;NaN,0", "inf,0 0,0 0,0 0,0", "1,0"] {
+            assert!(WarpMesh::parse(text, 1, 1).is_identity(), "{text}");
+        }
+        assert_eq!(parse_mesh(&vec!["1,1"; 4096].join(" ")).len(), 1025);
+        assert_eq!(WarpMesh::identity(usize::MAX, usize::MAX).controls.len(), 1024);
+        assert_eq!(WarpMesh::dimension(f64::NAN), 7);
+        let mut mesh = WarpMesh::identity(1, 1);
+        for vertex in &mut mesh.controls {
+            vertex[0] = [5.0, -2.0];
+        }
+        let resized = WarpMesh::parse(&mesh.format(), 3, 2);
+        assert!(resized.controls.iter().all(|v| v[0] == [5.0, -2.0]));
+    }
+
+    #[test]
+    fn mesh_warp_keyframes_interpolate_vertices_and_tangents_and_honor_hold() {
+        let mut mesh = WarpMesh::identity(1, 1);
+        mesh.controls[0][0] = [20.0, 10.0];
+        mesh.controls[0][2] = [0.0, 12.0];
+        let mut prop = Property::new(1, "mesh", "Distortion Mesh", Value::Str(String::new()));
+        prop.keys = vec![Keyframe::new(Tick::ZERO, Value::Str(String::new())), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Str(mesh.format()))];
+        let value = mesh_value(&prop, 1, 1, Tick::from_seconds_f64(0.5));
+        let Value::Str(text) = value else { panic!("expected mesh data") };
+        let middle = WarpMesh::parse(&text, 1, 1);
+        assert_eq!(middle.controls[0][0], [10.0, 5.0]);
+        assert_eq!(middle.controls[0][2], [0.0, 6.0]);
+        effectcraft_keyframe::easy_ease(&mut prop.keys[0], false, true);
+        effectcraft_keyframe::easy_ease(&mut prop.keys[1], true, false);
+        let Value::Str(eased) = mesh_value(&prop, 1, 1, Tick::from_seconds_f64(0.25)) else { panic!("expected mesh data") };
+        assert!(WarpMesh::parse(&eased, 1, 1).controls[0][0][0] < 5.0);
+        prop.keys[0].out_interp = effectcraft_keyframe::Interp::Hold;
+        let Value::Str(held) = mesh_value(&prop, 1, 1, Tick::from_seconds_f64(0.5)) else { panic!("expected mesh data") };
+        assert!(WarpMesh::parse(&held, 1, 1).is_identity());
     }
 
     #[test]

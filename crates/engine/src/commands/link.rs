@@ -164,7 +164,27 @@ fn pick_whip(s: &mut Session, p: &Value) -> Result<Value> {
     let r = reference(comp, from, target, tu, s.prefs.general.expression_pick_whip_compact).ok_or_else(|| bad("prop.pickWhip", "no such target property"))?;
     let (me, them) = (from.props.find(uid).ok_or(EngineError::NoComp)?, target.props.find(tu).ok_or(EngineError::NoComp)?);
     let (dm, dt) = (dims(from, me), dims(target, them));
-    let text = if dt == 1 && dm > 1 {
+    let text = if let Some(insert) = p.get("insert") {
+        let buffer = insert.get("expression").and_then(Value::as_str).ok_or_else(|| bad("prop.pickWhip", "insert needs an expression buffer"))?;
+        let start = insert
+            .get("start")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| bad("prop.pickWhip", "insert needs a character start"))?;
+        let end = insert
+            .get("end")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| bad("prop.pickWhip", "insert needs a character end"))?;
+        if buffer.len() > 1_048_576 || start > end || end > buffer.chars().count() {
+            return Err(bad("prop.pickWhip", "invalid expression insertion range or buffer exceeds 1 MiB"));
+        }
+        let a = buffer.char_indices().nth(start).map(|(i, _)| i).unwrap_or(buffer.len());
+        let b = buffer.char_indices().nth(end).map(|(i, _)| i).unwrap_or(buffer.len());
+        let prefix = buffer.get(..a).ok_or_else(|| bad("prop.pickWhip", "invalid expression insertion start"))?;
+        let suffix = buffer.get(b..).ok_or_else(|| bad("prop.pickWhip", "invalid expression insertion end"))?;
+        format!("{prefix}{r}{suffix}")
+    } else if dt == 1 && dm > 1 {
         format!("temp = {r};\n[{}]", vec!["temp"; dm].join(", "))
     } else if dt > 1 && dm == 1 {
         format!("{r}[0]")
@@ -183,7 +203,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pick Whip (Link Property)",
             [],
             None,
-            "{layer?, path|prop, target: {layer, path|prop}} → sets an AE reference expression",
+            "{layer?, path|prop, target: {layer, path|prop}, insert?: {expression, start, end} (character range)} → replaces the expression, or inserts a reference into the given editor buffer",
             has_layers,
             pick_whip
         ),

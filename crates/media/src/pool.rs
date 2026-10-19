@@ -355,6 +355,38 @@ impl MediaPool {
     /// the first two are dropped. Silence where there is no audio (or before the media starts).
     /// With a conformed audio folder, reads come from the conformed file once it is written.
     pub fn audio_samples(&self, footage: &Footage, start: Tick, frames: usize, rate: u32) -> Vec<f32> {
+        let Some(samples) = frames.checked_mul(2).filter(|samples| *samples <= isize::MAX as usize / std::mem::size_of::<f32>()) else { return vec![] };
+        if !footage.has_audio || footage.missing || rate == 0 || frames == 0 || footage.loop_count <= 1 {
+            return self.audio_samples_unlooped(footage, start, frames, rate);
+        }
+        let period = footage.duration.to_units_floor(i64::from(rate));
+        if period <= 0 {
+            return self.audio_samples_unlooped(footage, start, frames, rate);
+        }
+        // Decode/cache one native period, even when the layer plays it more than once.
+        // Split at each repeat and leave negative time and the final loop's tail silent.
+        let mut out = vec![0.0; samples];
+        let first = i128::from(start.to_units_floor(i64::from(rate)));
+        let limit = i128::from(period) * i128::from(footage.loop_count);
+        let mut offset = usize::try_from((-first).max(0)).unwrap_or(usize::MAX).min(frames);
+        while offset < frames {
+            let at = first + offset as i128;
+            if at >= limit {
+                break;
+            }
+            let native = at % i128::from(period);
+            let count = usize::try_from(i128::from(period) - native).unwrap_or(usize::MAX).min(frames - offset);
+            let tick = i64::try_from((native * i128::from(TICKS_PER_SECOND) + i128::from(rate) - 1) / i128::from(rate)).unwrap_or(i64::MAX);
+            let chunk = self.audio_samples_unlooped(footage, Tick(tick), count, rate);
+            if let Some(target) = out.get_mut(offset.saturating_mul(2)..offset.saturating_add(count).saturating_mul(2)) {
+                target.iter_mut().zip(chunk).for_each(|(to, from)| *to = from);
+            }
+            offset = offset.saturating_add(count);
+        }
+        out
+    }
+
+    fn audio_samples_unlooped(&self, footage: &Footage, start: Tick, frames: usize, rate: u32) -> Vec<f32> {
         if !footage.has_audio || footage.missing || rate == 0 || frames == 0 {
             return vec![0.0; frames * 2];
         }
@@ -594,7 +626,10 @@ impl Inner {
                 if let Some(img) = crate::layered::decode(path, &bytes, footage, op)? {
                     return Ok(img);
                 }
-                let img = image::load_from_memory(&bytes).map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
+                let img = match image::load_from_memory(&bytes) {
+                    Ok(image) => image,
+                    Err(error) => crate::exr_color::decode(&bytes).ok_or_else(|| MediaError::Decode(format!("{path}: {error}")))?,
+                };
                 Ok(dynamic_to_image(&img, op))
             }
             Some(mt) => {

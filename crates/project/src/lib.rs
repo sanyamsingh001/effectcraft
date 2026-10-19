@@ -1000,6 +1000,28 @@ impl Default for Footage {
 }
 
 impl Footage {
+    /// Finite source frame count before looping. Sequence filenames determine the count;
+    /// other footage durations round in the exact rational frame rate.
+    pub fn source_frame_count(&self) -> Option<i64> {
+        let rate = self.frame_rate;
+        if !matches!(self.kind, FootageKind::Video | FootageKind::Audio | FootageKind::Sequence)
+            || rate.num <= 0
+            || rate.den <= 0
+            || rate.frame_duration() <= Tick::ZERO
+        {
+            return None;
+        }
+        if self.kind == FootageKind::Sequence && !self.sequence.is_empty() {
+            return Some(i64::try_from(self.sequence.len()).unwrap_or(i64::MAX));
+        }
+        if self.duration <= Tick::ZERO {
+            return None;
+        }
+        let denominator = i128::from(effectcraft_time::TICKS_PER_SECOND) * i128::from(rate.den);
+        let numerator = i128::from(self.duration.0) * i128::from(rate.num);
+        Some(i64::try_from((numerator + denominator / 2) / denominator).unwrap_or(i64::MAX).max(1))
+    }
+
     /// The data format of data footage: `json`, `csv` or `tsv` (from the file extension).
     pub fn data_format(&self) -> Option<&'static str> {
         if self.kind != FootageKind::Data {
@@ -1121,6 +1143,27 @@ impl Item {
             _ => None,
         }
     }
+    /// Finite source playback bounds, including sequence lengths and footage loops. The last
+    /// frame is in interpreted source time; a conformed rate's native rate is only used by the
+    /// media provider to locate that frame in the file.
+    pub fn source_span(&self) -> Option<(Tick, Tick)> {
+        let (duration, rate, frames) = match &self.kind {
+            ItemKind::Comp(c) => (c.duration, c.frame_rate, None),
+            ItemKind::Footage(f) if matches!(f.kind, FootageKind::Video | FootageKind::Audio | FootageKind::Sequence) => {
+                let rate = f.frame_rate;
+                let count = f.source_frame_count()?;
+                let total = count.saturating_mul(i64::from(f.loop_count.max(1))).min(rate.frame_at(Tick::MAX));
+                (rate.tick_of(total), rate, Some(total))
+            }
+            _ => return None,
+        };
+        if duration <= Tick::ZERO || rate.num <= 0 || rate.den <= 0 || rate.frame_duration() <= Tick::ZERO {
+            return None;
+        }
+        let last = frames.map(|n| rate.tick_of(n.saturating_sub(1))).unwrap_or_else(|| rate.tick_of(rate.frame_at(duration - Tick(1))));
+        Some((duration, last.max(Tick::ZERO)))
+    }
+
     pub fn frame_rate(&self) -> Option<FrameRate> {
         match &self.kind {
             ItemKind::Comp(c) => Some(c.frame_rate),
@@ -1225,18 +1268,92 @@ impl Project {
         c.layers.iter().any(|l| matches!(l.source, LayerSource::Comp { item } if self.comp_contains(item, inner)))
     }
     /// Make sure `next_id` exceeds every id in the project (after loading or merging).
-    pub fn fix_next_id(&mut self) {
-        let mut m = self.next_id;
-        for (id, it) in &self.items {
-            m = m.max(id.0 + 1);
-            if let ItemKind::Comp(c) = &it.kind {
-                for l in &c.layers {
-                    m = m.max(l.id.0 + 1).max(l.props.max_uid() + 1);
+    fn next_id_after_existing(&self) -> Result<u64, ProjectError> {
+        let after = |id: u64| id.checked_add(1).ok_or_else(|| ProjectError::Invalid("the project has exhausted its identifier range".into()));
+        let mut next = self.next_id;
+        for (id, item) in &self.items {
+            next = next.max(after(id.0)?);
+            if let ItemKind::Comp(comp) = &item.kind {
+                for layer in &comp.layers {
+                    next = next.max(after(layer.id.0)?).max(after(layer.props.max_uid())?);
+                }
+                if let Some(essential) = &comp.essential {
+                    // Keep the allocation floor above saved control IDs, including groups.
+                    // Walk iteratively so nested groups do not add recursive call depth.
+                    let mut groups = vec![essential.controls.iter()];
+                    while let Some(group) = groups.last_mut() {
+                        if let Some(control) = group.next() {
+                            next = next.max(after(control.id)?);
+                            if let essential::EgKind::Group { children } = &control.kind {
+                                groups.push(children.iter());
+                            }
+                        } else {
+                            groups.pop();
+                        }
+                    }
                 }
             }
         }
-        self.next_id = m;
+        if next == u64::MAX {
+            return Err(ProjectError::Invalid("the project has exhausted its identifier range".into()));
+        }
+        Ok(next)
     }
+
+    pub fn fix_next_id(&mut self) {
+        // Preserve the existing infallible API without wrapping or reusing an authored ID.
+        // Project loading uses the checked result to reject an exhausted file.
+        self.next_id = self.next_id_after_existing().unwrap_or(u64::MAX);
+    }
+    /// Older projects omit layer Skew. Add zero-default controls without replacing stored data.
+    fn ensure_layer_skew(&mut self) -> Result<(), ProjectError> {
+        let mut needed = 0_u64;
+        for item in self.items.values() {
+            let ItemKind::Comp(comp) = &item.kind else { continue };
+            for layer in &comp.layers {
+                if layer.is_camera() || layer.is_light() {
+                    continue;
+                }
+                if let Some(tr) = layer.transform() {
+                    for id in ["skew", "skewAxis"] {
+                        if tr.get(id).is_none() {
+                            needed = needed.checked_add(1).ok_or_else(|| ProjectError::Invalid("not enough property identifiers for layer Skew".into()))?;
+                        }
+                    }
+                }
+            }
+        }
+        if needed == 0 {
+            return Ok(());
+        }
+        let end = self
+            .next_id
+            .checked_add(needed)
+            .filter(|end| *end < u64::MAX)
+            .ok_or_else(|| ProjectError::Invalid("not enough property identifiers for layer Skew".into()))?;
+        let mut next = self.next_id;
+        for item in self.items.values_mut() {
+            let ItemKind::Comp(comp) = &mut item.kind else { continue };
+            for layer in &mut Arc::make_mut(comp).layers {
+                if layer.is_camera() || layer.is_light() {
+                    continue;
+                }
+                let Some(tr) = layer.props.sub_mut("transform") else { continue };
+                for (id, axis) in [("skew", false), ("skewAxis", true)] {
+                    if tr.get(id).is_some() {
+                        continue;
+                    }
+                    let prop = build::layer_skew_property(next, axis);
+                    next = next.saturating_add(1); // The whole range was checked before mutation.
+                    // Existing numeric property paths keep their indices.
+                    tr.children.push(prop.into());
+                }
+            }
+        }
+        self.next_id = end;
+        Ok(())
+    }
+
     /// Whether `other` holds the same content. An allocated id counts (an edit may hand it out
     /// beyond the project, so it must stay taken). Shared compositions compare by pointer first,
     /// so after a copy-on-write edit only the comps it touched are compared field by field.
@@ -1286,10 +1403,14 @@ impl Project {
         if p.schema > SCHEMA_VERSION {
             return Err(ProjectError::Invalid(format!("project schema {} is newer than this version supports ({SCHEMA_VERSION})", p.schema)));
         }
-        p.fix_next_id();
+        p.next_id = p.next_id_after_existing()?;
+        p.ensure_layer_skew()?;
         Ok(p)
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_layer_skew;

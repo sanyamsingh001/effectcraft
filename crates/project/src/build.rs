@@ -31,6 +31,17 @@ fn popup(opts: &[&str]) -> ParamUi {
     ParamUi::Popup { options: opts.iter().map(|s| s.to_string()).collect() }
 }
 
+/// Standard 2D layer Skew / Skew Axis, shared by new-layer builders and legacy files.
+pub(crate) fn layer_skew_property(uid: u64, axis: bool) -> Property {
+    let mut prop = if axis {
+        Property::new(uid, "skewAxis", "Skew Axis", Value::Scalar(0.0)).with_ui(ParamUi::Angle)
+    } else {
+        Property::new(uid, "skew", "Skew", Value::Scalar(0.0)).with_ui(slider(-85.0, 85.0, -85.0, 85.0, 1))
+    };
+    prop.two_d_only = true;
+    prop
+}
+
 /// Layer Transform group. Values are always 3D; 2D layers show two dimensions.
 pub fn transform(ids: &mut Ids, anchor: [f64; 2], position: [f64; 2]) -> PropGroup {
     let mut a = ids.prop("anchor", "Anchor Point", Value::Vec3([anchor[0], anchor[1], 0.0])).with_ui(ParamUi::Point).spatial();
@@ -47,7 +58,11 @@ pub fn transform(ids: &mut Ids, anchor: [f64; 2], position: [f64; 2]) -> PropGro
     ry.three_d_only = true;
     let rz = ids.prop("rotation", "Rotation", Value::Scalar(0.0)).with_ui(ParamUi::Angle);
     let op = ids.prop("opacity", "Opacity", Value::Scalar(100.0)).with_ui(slider(0.0, 100.0, 0.0, 100.0, 0));
-    ids.group("transform", "Transform").with(a).with(p).with(s).with(o).with(rx).with(ry).with(rz).with(op)
+    // Keep the existing transform/property UIDs stable; the new controls take fresh IDs.
+    let tr = ids.group("transform", "Transform");
+    let skew = layer_skew_property(ids.alloc(), false);
+    let skew_axis = layer_skew_property(ids.alloc(), true);
+    tr.with(a).with(p).with(s).with(o).with(rx).with(ry).with(rz).with(op).with(skew).with(skew_axis)
 }
 
 pub fn masks(ids: &mut Ids) -> PropGroup {

@@ -111,7 +111,7 @@ fn rect_mesh(w: f64, h: f64, tris: f64) -> Mesh {
 }
 
 fn pin(kind: PinKind, rest: [f64; 2], pos: [f64; 2]) -> Pin {
-    Pin { kind, uid: 0, rest, position: pos, scale: 1.0, rotation: 0.0, amount: 50.0, extent: 15.0, in_front: 50.0 }
+    Pin { kind, uid: 0, rest, attachment: false, position: pos, scale: 1.0, rotation: 0.0, amount: 50.0, extent: 15.0, in_front: 50.0 }
 }
 
 #[test]
@@ -134,6 +134,48 @@ fn arap_single_pin_translates_rigidly() {
     for (a, b) in d.iter().zip(&m.verts) {
         assert!((a[0] - b[0] - t[0]).abs() < 1e-7 && (a[1] - b[1] - t[1]).abs() < 1e-7, "{a:?} vs {b:?}");
     }
+}
+
+/// #313: the similarity solve has free rotation with only one Position pin. Large meshes
+/// used to amplify round-off into a visible tilt even when the pin had never moved.
+#[test]
+fn first_pin_keeps_a_large_mesh_at_rest_everywhere() {
+    let m = rect_mesh(800.0, 600.0, 350.0);
+    for at in [[0.123456789, 0.987654321], [17.0, 29.0], [783.0, 29.0], [17.0, 571.0], [783.0, 571.0], [413.5, 287.25]] {
+        for kind in [PinKind::Position, PinKind::Advanced, PinKind::Bend] {
+            let d = solve(&m, &[pin(kind, at, at)], 2);
+            assert!(d == m.verts, "an unchanged {kind:?} pin at {at:?} must preserve the rest mesh");
+        }
+    }
+}
+
+#[test]
+fn one_pin_translates_a_large_mesh_without_rotation() {
+    let m = rect_mesh(800.0, 600.0, 350.0);
+    let delta = [112.5, -47.25];
+    for at in [[17.0, 29.0], [783.0, 571.0], [413.5, 287.25]] {
+        for kind in [PinKind::Position, PinKind::Advanced] {
+            let d = solve(&m, &[pin(kind, at, [at[0] + delta[0], at[1] + delta[1]])], 2);
+            for (actual, rest) in d.iter().zip(&m.verts) {
+                assert!(
+                    (actual[0] - rest[0] - delta[0]).abs() < 1e-9 && (actual[1] - rest[1] - delta[1]).abs() < 1e-9,
+                    "{kind:?} pin at {at:?}: {actual:?} vs translated {rest:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn advanced_pin_rotation_and_scale_still_deform_the_mesh() {
+    let m = rect_mesh(100.0, 60.0, 200.0);
+    let at = [50.0, 30.0];
+    let p = Pin { rotation: 90.0, scale: 1.5, ..pin(PinKind::Advanced, at, at) };
+    let d = solve(&m, &[p], 2);
+    let a = nearest(&m.verts, [0.0, 30.0]).unwrap();
+    let b = nearest(&m.verts, [100.0, 30.0]).unwrap();
+    let edge = [d[b][0] - d[a][0], d[b][1] - d[a][1]];
+    assert!(edge[1] > 80.0 && edge[0].abs() < 5.0, "rotated edge {edge:?}");
 }
 
 #[test]
@@ -284,6 +326,16 @@ fn render_is_deterministic_and_antialiased() {
 }
 
 #[test]
+fn deformed_mesh_contains_points_in_either_winding() {
+    let m = rect_mesh(100.0, 40.0, 150.0);
+    let d: Vec<_> = m.verts.iter().map(|p| [210.0 - p[0], p[1] + 20.0]).collect();
+    assert!(contains(&m, &d, [160.0, 40.0]));
+    assert!(!contains(&m, &d, [50.0, 20.0]));
+    assert!(!contains(&m, &[], [160.0, 40.0]));
+    assert!(!contains(&m, &vec![[0.0; 2]; m.verts.len()], [0.0, 0.0]));
+}
+
+#[test]
 fn unmap_inverts_the_deformation() {
     let m = rect_mesh(100.0, 40.0, 150.0);
     let pins = [pin(PinKind::Position, [0.0, 20.0], [10.0, 30.0]), pin(PinKind::Position, [100.0, 20.0], [90.0, 0.0])];
@@ -305,4 +357,205 @@ fn groups_round_trip_serde() {
     assert_eq!(m[0].pins.len(), 2);
     assert_eq!(m[0].pins[1].kind, PinKind::Starch);
     assert_eq!(m[0].pins[0].position, [3.0, 4.0]);
+}
+
+fn attachment_at(mesh: &Mesh, pose: &[[f64; 2]], rest: [f64; 2]) -> Pin {
+    let point = attachment_point(mesh, rest, rest).unwrap();
+    let position = [0, 1].map(|c| point.vertices.iter().zip(point.weights).map(|(i, w)| pose[*i][c] * w).sum());
+    Pin { attachment: true, ..pin(PinKind::Position, rest, position) }
+}
+fn attachment_position(mesh: &Mesh, pose: &[[f64; 2]], p: Pin) -> [f64; 2] {
+    let point = attachment_point(mesh, p.rest, p.position).unwrap();
+    [0, 1].map(|c| point.vertices.iter().zip(point.weights).map(|(i, w)| pose[*i][c] * w).sum())
+}
+fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
+    (a[0] - b[0]).hypot(a[1] - b[1])
+}
+fn assert_attachment(mesh: &Mesh, pose: &[[f64; 2]], pin: Pin) {
+    let actual = attachment_position(mesh, pose, pin);
+    assert!(distance(actual, pin.position) < 1e-7, "{actual:?} vs {:?}", pin.position);
+}
+
+#[test]
+fn posed_position_attachment_preserves_shape_and_moves_continuously() {
+    let m = rect_mesh(800.0, 160.0, 350.0);
+    let old = [pin(PinKind::Position, [0.0, 80.0], [0.0, 80.0]), pin(PinKind::Position, [800.0, 80.0], [640.0, -180.0])];
+    let before = solve(&m, &old, 2);
+    let third = attachment_at(&m, &before, [730.0, 50.0]);
+    assert!(can_attach(&m, &old, third.rest));
+    let unposed = unmap(&m, &before, third.position);
+    assert!(distance(unposed, third.rest) < 1e-8);
+    assert_eq!(solve(&m, &[old[0], old[1], third], 2), before, "adding a pin must preserve every posed vertex");
+    for delta in [0.0001, 1.0, 25.0] {
+        let moved = Pin { position: [third.position[0] + delta, third.position[1]], ..third };
+        let after = solve(&m, &[old[0], old[1], moved], 2);
+        assert_attachment(&m, &after, moved);
+        assert!(after.iter().flatten().all(|v| v.is_finite()));
+        if delta < 0.001 {
+            let max = after.iter().zip(&before).map(|(a, b)| distance(*a, *b)).fold(0.0, f64::max);
+            assert!(max < 0.01, "tiny movement caused a jump of{max}px");
+        }
+        for p in old {
+            let v = nearest(&m.verts, p.rest).unwrap();
+            let target = [m.verts[v][0] + (p.position[0] - p.rest[0]), m.verts[v][1] + (p.position[1] - p.rest[1])];
+            assert!(distance(after[v], target) < 1e-8);
+        }
+        let fourth = attachment_at(&m, &after, [500.0, 100.0]);
+        assert!(can_attach(&m, &[old[0], old[1], moved], fourth.rest));
+        assert_eq!(solve(&m, &[old[0], old[1], moved, fourth], 2), after);
+        let fourth = Pin { position: [fourth.position[0], fourth.position[1] - 10.0], ..fourth };
+        let both = solve(&m, &[old[0], old[1], moved, fourth], 2);
+        assert_attachment(&m, &both, moved);
+        assert_attachment(&m, &both, fourth);
+    }
+}
+
+#[test]
+fn attachment_holds_during_old_pin_animation_and_can_return_to_rest() {
+    let m = rect_mesh(800.0, 160.0, 350.0);
+    let left = pin(PinKind::Position, [0.0, 80.0], [0.0, 80.0]);
+    let right = pin(PinKind::Position, [800.0, 80.0], [640.0, -180.0]);
+    let third = attachment_at(&m, &solve(&m, &[left, right], 2), [730.0, 50.0]);
+    for position in [[700.0, -100.0], [800.0, 80.0], [600.0, -220.0]] {
+        let animated = Pin { position, ..right };
+        let pose = solve(&m, &[left, animated, third], 2);
+        assert_attachment(&m, &pose, third);
+        let v = nearest(&m.verts, right.rest).unwrap();
+        assert!(distance(pose[v], [m.verts[v][0] + position[0] - right.rest[0], m.verts[v][1] + position[1] - right.rest[1]]) < 1e-8);
+    }
+    assert_eq!(solve(&m, &[left, Pin { position: right.rest, ..right }, Pin { position: third.rest, ..third }], 2), m.verts);
+}
+
+#[test]
+fn attachment_rejects_dependent_outside_and_degenerate_points() {
+    let m = rect_mesh(100.0, 60.0, 200.0);
+    let first = pin(PinKind::Position, m.verts[0], m.verts[0]);
+    assert!(!can_attach(&m, &[first], m.verts[0]));
+    assert!(!can_attach(&m, &[], [-100.0, -100.0]));
+    assert!(!can_attach(&m, &[], [f64::NAN, 0.0]));
+    let p = attachment_at(&m, &m.verts, [50.0, 30.0]);
+    assert!(!can_attach(&m, &[p], p.rest));
+    let degenerate = Mesh { verts: vec![[0.0, 0.0], [100.0, 0.0], [200.0, 0.0]], tris: vec![[0, 1, 2]], outline: vec![] };
+    assert!(!can_attach(&degenerate, &[], [50.0, 0.0]));
+    let outside = Pin { attachment: true, ..pin(PinKind::Position, [-100.0, -100.0], [-90.0, -90.0]) };
+    assert_eq!(solve(&m, &[outside], 2), m.verts);
+    let thin = Mesh { verts: vec![[0.0, 0.0], [100.0, 0.0], [0.0, 1e-10]], tris: vec![[0, 1, 2]], outline: vec![] };
+    let p = attachment_at(&thin, &thin.verts, [20.0, 2e-11]);
+    assert!(can_attach(&thin, &[], p.rest));
+    assert_eq!(solve(&thin, &[p], 2), thin.verts);
+    let moved = Pin { position: [21.0, 2e-11], ..p };
+    let pose = solve(&thin, &[moved], 2);
+    assert!(pose.iter().flatten().all(|v| v.is_finite()));
+    assert_attachment(&thin, &pose, moved);
+}
+
+#[test]
+fn attachment_budget_is_checked_before_insertion_and_neutral_solves_are_exact() {
+    let m = rect_mesh(800.0, 160.0, 350.0);
+    let mut pins = vec![];
+    for v in m.verts.iter().take(MAX_ATTACHMENTS) {
+        assert!(can_attach(&m, &pins, *v));
+        pins.push(Pin { attachment: true, ..pin(PinKind::Position, *v, *v) });
+    }
+    assert!(!can_attach(&m, &pins, m.verts[MAX_ATTACHMENTS]));
+    assert_eq!(solve(&m, &pins, 2), m.verts);
+}
+
+#[test]
+fn posed_attachment_preserves_rendered_pixels_and_serializes() {
+    let mut fx = puppet_fx(&[(PinKind::Position, [15.0, 30.0], [15.0, 30.0]), (PinKind::Position, [50.0, 30.0], [40.0, 10.0])]);
+    let image = test_image();
+    let input = Buf { img: image, offset: [0.0; 2], scale: 1.0 };
+    let params = flatten_params(&fx, &mut |p| p.value.clone());
+    let meshes = overlay(&input, &params);
+    let (uid, mesh, pose, existing) = &meshes[0];
+    let triangle = mesh.tris[mesh.tris.len() / 2];
+    let rest = [0, 1].map(|c| triangle.iter().map(|i| mesh.verts[*i][c]).sum::<f64>() / 3.0);
+    let attached = attachment_at(mesh, pose, rest);
+    assert!(can_attach(mesh, existing, rest));
+    let apply = |group: &PropGroup| {
+        let params = flatten_params(group, &mut |p| p.value.clone());
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [64.0; 2], seed: 1, adjustment: false, env: EffectEnv::default() };
+        crate::apply(&specs().remove(0), &ctx, input.clone())
+    };
+    let before = apply(&fx);
+    let mut next = 9000;
+    let mut ids = Ids(&mut next);
+    let mut pin = pin_group(&mut ids, "Puppet Pin 3", PinKind::Position, rest);
+    pin.children.push(hidden(&mut ids, "attachment", Value::Bool(true)).into());
+    pin.get_mut("position").unwrap().value = Value::Vec2(attached.position);
+    let json = serde_json::to_value(&pin).unwrap();
+    assert!(json.to_string().contains("attachment"));
+    let pin: PropGroup = serde_json::from_value(json).unwrap();
+    fx.find_group_mut(*uid).unwrap().sub_mut("deform").unwrap().children.push(pin.into());
+    let after = apply(&fx);
+    assert_eq!(after.offset, before.offset);
+    assert_eq!(after.scale, before.scale);
+    assert_eq!(after.img, before.img, "placing the pin must preserve every rendered pixel");
+    let params = flatten_params(&fx, &mut |p| p.value.clone());
+    assert!(parse(&params)[0].pins.last().unwrap().attachment);
+}
+
+#[test]
+fn malformed_and_huge_attachment_rows_do_not_panic_or_propagate_nan() {
+    let m = rect_mesh(100.0, 60.0, 200.0);
+    assert!(!can_attach(&m, &[], [1e308, 1e308]));
+    let mut handles = arap::Handles::default();
+    for point in [
+        arap::PointTarget { vertices: [usize::MAX, 0, 1], weights: [1.0, 0.0, 0.0], position: [10.0, 10.0] },
+        arap::PointTarget { vertices: [0, 1, 2], weights: [f64::NAN, 0.5, 0.5], position: [10.0, 10.0] },
+        arap::PointTarget { vertices: [0, 1, 2], weights: [1e308, 1e308, 0.0], position: [10.0, 10.0] },
+        arap::PointTarget { vertices: [0, 1, 2], weights: [0.2, 0.4, 0.4], position: [f64::INFINITY, 10.0] },
+    ] {
+        handles.points = vec![point];
+        assert_eq!(arap::deform(&m.verts, &m.tris, &[], &handles, 2), m.verts);
+    }
+    handles.points = vec![arap::PointTarget { vertices: [0, 1, 2], weights: [0.2, 0.4, 0.4], position: [1e308, 1e308] }];
+    let pose = arap::deform(&m.verts, &m.tris, &[], &handles, 2);
+    assert!(pose.iter().flatten().all(|v| v.is_finite()));
+    let malformed = Pin { attachment: true, ..pin(PinKind::Position, [1e308, 1e308], [1e308, 1e308]) };
+    assert_eq!(solve(&m, &[malformed], 2), m.verts);
+    let extremes = [
+        Pin { attachment: true, ..pin(PinKind::Position, [30.0, 20.0], [1e308, 1e308]) },
+        Pin { attachment: true, ..pin(PinKind::Position, [70.0, 40.0], [-1e308, -1e308]) },
+    ];
+    assert!(solve(&m, &extremes, 2).iter().flatten().all(|v| v.is_finite()));
+}
+
+#[test]
+fn only_remaining_attachment_translates_without_rotation() {
+    let m = rect_mesh(800.0, 600.0, 350.0);
+    let delta = [112.5, -47.25];
+    let rest = [17.0, 29.0];
+    let p = Pin { attachment: true, ..pin(PinKind::Position, rest, [rest[0] + delta[0], rest[1] + delta[1]]) };
+    let pose = solve(&m, &[p], 2);
+    for (a, b) in pose.iter().zip(&m.verts) {
+        assert!(distance(*a, [b[0] + delta[0], b[1] + delta[1]]) < 1e-7, "{a:?} vs translated{b:?}");
+    }
+}
+
+#[test]
+fn render_off_canvas_translation_preserves_the_solid() {
+    let source = Image::filled(16, 12, [0.25, 0.5, 0.75, 1.0]);
+    for delta in [[256.0, 0.0], [-256.0, 0.0], [0.0, 256.0], [0.0, -256.0]] {
+        let output = run(&puppet_fx(&[(PinKind::Position, [8.0, 6.0], [8.0 + delta[0], 6.0 + delta[1]])]), source.clone());
+        assert!(output.offset.iter().all(|v| v.is_finite()));
+        assert!(output.img.data.iter().flatten().all(|v| v.is_finite()));
+        for y in 0..12 {
+            for x in 0..16 {
+                assert_eq!(at(&output, x, y), [0.0; 4], "original canvas at ({x},{y}), delta {delta:?}");
+            }
+        }
+        assert_eq!(at(&output, 8 + delta[0] as i64, 6 + delta[1] as i64), [0.25, 0.5, 0.75, 1.0]);
+    }
+}
+
+#[test]
+fn render_far_off_canvas_translation_stays_finite_and_transparent() {
+    let source = Image::filled(16, 12, [0.25, 0.5, 0.75, 1.0]);
+    for position in [[1e20, 6.0], [-1e20, 6.0], [8.0, 1e20], [8.0, -1e20]] {
+        let output = run(&puppet_fx(&[(PinKind::Position, [8.0, 6.0], position)]), source.clone());
+        assert!(output.offset.iter().all(|v| v.is_finite()), "position {position:?}");
+        assert!(output.img.data.iter().all(|p| *p == [0.0; 4]), "pixel precision cannot resolve a solid at {position:?}");
+    }
 }

@@ -231,7 +231,7 @@ impl Builder {
         if let Some(&i) = self.tex_keys.get(&key) {
             return i;
         }
-        let lin = srgb && !self.s.linear_io;
+        // Imported model colour maps remain sRGB-encoded in every project working mode.
         let wrap = t.wrap.map(|w| match w {
             model::Wrap::Repeat => 0,
             model::Wrap::Clamp => 1,
@@ -241,7 +241,7 @@ impl Builder {
             t.width,
             t.height,
             wrap,
-            t.data.iter().map(|p| if lin { [srgb_to_linear(p[0]), srgb_to_linear(p[1]), srgb_to_linear(p[2]), p[3]] } else { *p }),
+            t.data.iter().map(|p| if srgb { [srgb_to_linear(p[0]), srgb_to_linear(p[1]), srgb_to_linear(p[2]), p[3]] } else { *p }),
         );
         self.tex_keys.insert(key, i);
         i

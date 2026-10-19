@@ -27,11 +27,18 @@ struct FakeWorker {
     state: Mutex<(Mirror, FrameServer, Vec<(RemoteDone, RemoteFrame)>, u64)>,
     /// Patch / full-project syncs sent.
     syncs: Mutex<Vec<&'static str>>,
+    /// Source times dispatched to the worker, in order.
+    started: Mutex<Vec<effectcraft_engine::time::Tick>>,
 }
 
 impl FakeWorker {
     fn new(s: &Session, slots: usize) -> FakeWorker {
-        FakeWorker { slots, state: Mutex::new((Mirror::default(), FrameServer::new(s.footage.clone(), s.expr.clone()), vec![], 0)), syncs: Mutex::default() }
+        FakeWorker {
+            slots,
+            state: Mutex::new((Mirror::default(), FrameServer::new(s.footage.clone(), s.expr.clone()), vec![], 0)),
+            syncs: Mutex::default(),
+            started: Mutex::default(),
+        }
     }
     fn pending(&self) -> usize {
         self.state.lock().unwrap().2.len()
@@ -62,6 +69,7 @@ impl RemoteFrames for FakeWorker {
         self.slots
     }
     fn start(&self, job: RemoteJob, done: RemoteDone) {
+        self.started.lock().unwrap().push(job.t);
         let mut st = self.state.lock().unwrap();
         let (mirror, server, pending, next) = &mut *st;
         if let Some(m) = mirror.sync(job.revision, &job.project) {
@@ -166,6 +174,90 @@ fn viewer_frames_render_remotely_from_project_diffs() {
     // Without slots the remote renderer is unusable (frames render here again).
     frames.set_remote(Some(Arc::new(FakeWorker::new(&s, 0))));
     assert!(!frames.remote_active());
+}
+
+/// Scrubbing while a single worker is busy keeps the latest viewer position and explicit
+/// RAM-preview frames. Frames already dispatched complete through the normal callback.
+#[test]
+fn scrub_requests_drop_superseded_frames_and_keep_preview_prefetch() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 8, "height": 8, "duration": 1, "frameRate": 24})).unwrap();
+    let comp = s.active_comp_id().unwrap();
+    let rate = s.project.comp(comp).unwrap().frame_rate;
+    let key = |frame| FrameKey {
+        revision: s.revision,
+        content: effectcraft_ui_egui::frames::comp_content(&s.project, comp),
+        comp: comp.0,
+        frame,
+        scale: 1000,
+        view: 0,
+        opts: 0,
+    };
+    let src = source(&s);
+    let opts = RenderOpts::default();
+    let worker = Arc::new(FakeWorker::new(&s, 1));
+    let mut frames = Frames::default();
+    frames.set_remote(Some(worker.clone()));
+    frames.request_urgent(&src, key(0), comp, rate.tick_of(0), opts);
+    assert_eq!(frames.dispatch_remote(), 1);
+    frames.request(&src, key(9), comp, rate.tick_of(9), opts);
+    for frame in 1..=5 {
+        frames.request_urgent(&src, key(frame), comp, rate.tick_of(frame), opts);
+    }
+    assert_eq!(frames.inflight(), 3, "running frame, latest scrub frame, preview frame");
+    assert_eq!(frames.dispatch_remote(), 0, "the existing worker still owns its slot");
+    worker.deliver();
+    assert_eq!(frames.dispatch_remote(), 1);
+    assert_eq!(worker.started.lock().unwrap().last(), Some(&rate.tick_of(5)));
+    worker.deliver();
+    assert_eq!(frames.dispatch_remote(), 1, "preview continues after the viewer frame");
+    worker.deliver();
+    assert_eq!(*worker.started.lock().unwrap(), [rate.tick_of(0), rate.tick_of(5), rate.tick_of(9)]);
+    assert_eq!(frames.dispatch_remote(), 0, "obsolete scrub positions never reach the worker");
+    assert_eq!(frames.inflight(), 0);
+    assert!(frames.is_cached(&key(5)) && frames.is_cached(&key(9)));
+    assert!((1..5).all(|frame| !frames.is_cached(&key(frame))));
+
+    frames.request_urgent(&src, key(4), comp, rate.tick_of(4), opts);
+    frames.request_urgent(&src, key(5), comp, rate.tick_of(5), opts);
+    assert_eq!(frames.inflight(), 0, "returning to a cached position drops the queued scrub frame");
+    assert_eq!(frames.dispatch_remote(), 0);
+}
+
+#[test]
+fn preview_frames_promoted_to_urgent_survive_later_scrubbing() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 8, "height": 8, "duration": 1, "frameRate": 24})).unwrap();
+    let comp = s.active_comp_id().unwrap();
+    let rate = s.project.comp(comp).unwrap().frame_rate;
+    let key = |frame| FrameKey {
+        revision: s.revision,
+        content: effectcraft_ui_egui::frames::comp_content(&s.project, comp),
+        comp: comp.0,
+        frame,
+        scale: 1000,
+        view: 0,
+        opts: 0,
+    };
+    let src = source(&s);
+    let opts = RenderOpts::default();
+    let worker = Arc::new(FakeWorker::new(&s, 1));
+    let mut frames = Frames::default();
+    frames.set_remote(Some(worker.clone()));
+    frames.request(&src, key(1), comp, rate.tick_of(1), opts);
+    frames.request_urgent(&src, key(1), comp, rate.tick_of(1), opts);
+    frames.request_urgent(&src, key(2), comp, rate.tick_of(2), opts);
+    // Preview can also request a queued viewer frame after its urgent request.
+    frames.request(&src, key(2), comp, rate.tick_of(2), opts);
+    frames.request_urgent(&src, key(3), comp, rate.tick_of(3), opts);
+    assert_eq!(frames.inflight(), 3);
+    for _ in 0..3 {
+        assert_eq!(frames.dispatch_remote(), 1);
+        worker.deliver();
+    }
+    assert_eq!(*worker.started.lock().unwrap(), [rate.tick_of(3), rate.tick_of(1), rate.tick_of(2)]);
+    assert_eq!(frames.inflight(), 0);
+    assert!(frames.is_cached(&key(1)) && frames.is_cached(&key(2)) && frames.is_cached(&key(3)));
 }
 
 /// Holds offloaded jobs until the test runs them.

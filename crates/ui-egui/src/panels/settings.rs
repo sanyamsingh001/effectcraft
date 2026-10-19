@@ -427,45 +427,55 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let cur = serde_json::to_value(&app.session.prefs).unwrap_or_default();
     let mut acts: Vec<Act> = vec![];
     let (mut ok, mut cancel) = (false, false);
-    super::dialogs::modal(ctx, "Settings", vec2(820.0, 600.0), t, |ui| {
+    let (content, viewport) = super::dialogs::modal_geometry(ctx, "Settings", vec2(820.0, 600.0), t, |ui| {
         let body_h = (ctx.content_rect().height() - 170.0).clamp(120.0, 470.0);
         ui.allocate_ui_with_layout(vec2(ui.available_width(), body_h), egui::Layout::left_to_right(egui::Align::Min), |ui| {
             ui.set_height(body_h);
             // Page list (left, like After Effects).
             ui.vertical(|ui| {
                 ui.set_width(180.0);
-                egui::ScrollArea::vertical().id_salt("settings-pages").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
-                    for p in &all {
-                        let (r, resp) = ui.allocate_exact_size(vec2(176.0, 24.0), egui::Sense::click());
-                        let sel = page == p.id;
-                        if sel {
-                            ui.painter().rect_filled(r, 3.0, t.accent);
-                        } else if resp.hovered() {
-                            ui.painter().rect_filled(r, 3.0, t.hover);
+                crate::widgets::vertical_scroll_area(
+                    ui,
+                    egui::Id::new("settings-pages-middle"),
+                    egui::ScrollArea::vertical().id_salt("settings-pages").max_height(body_h).auto_shrink([false, false]),
+                    |ui| {
+                        for p in &all {
+                            let (r, resp) = ui.allocate_exact_size(vec2(176.0, 24.0), egui::Sense::click());
+                            let sel = page == p.id;
+                            if sel {
+                                ui.painter().rect_filled(r, 3.0, t.accent);
+                            } else if resp.hovered() {
+                                ui.painter().rect_filled(r, 3.0, t.hover);
+                            }
+                            ui.painter().text(
+                                r.left_center() + vec2(10.0, 0.0),
+                                egui::Align2::LEFT_CENTER,
+                                p.title,
+                                Tokens::ui(12.5),
+                                if sel { Color32::WHITE } else { t.text },
+                            );
+                            app.auto.add(&format!("settings.page.{}", p.id), r, p.title);
+                            if resp.clicked() {
+                                page = p.id.to_string();
+                            }
                         }
-                        ui.painter().text(
-                            r.left_center() + vec2(10.0, 0.0),
-                            egui::Align2::LEFT_CENTER,
-                            p.title,
-                            Tokens::ui(12.5),
-                            if sel { Color32::WHITE } else { t.text },
-                        );
-                        app.auto.add(&format!("settings.page.{}", p.id), r, p.title);
-                        if resp.clicked() {
-                            page = p.id.to_string();
-                        }
-                    }
-                });
+                    },
+                );
             });
             ui.separator();
             ui.vertical(|ui| {
-                ui.set_width(590.0);
+                ui.set_width(ui.available_width().max(0.0));
                 let p = &all[idx];
                 ui.label(RichText::new(p.title).font(Tokens::semibold(14.0)).color(t.tab_text_active));
                 ui.add_space(6.0);
-                egui::ScrollArea::vertical().max_height(body_h - 30.0).auto_shrink([false, false]).show(ui, |ui| {
-                    page_ui(app, ui, p, &cur, t, &mut acts);
-                });
+                crate::widgets::vertical_scroll_area(
+                    ui,
+                    egui::Id::new("settings-body-middle"),
+                    egui::ScrollArea::vertical().max_height(body_h - 30.0).auto_shrink([false, false]),
+                    |ui| {
+                        page_ui(app, ui, p, &cur, t, &mut acts);
+                    },
+                );
             });
         });
         ui.add_space(8.0);
@@ -491,6 +501,8 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             });
         });
     });
+    app.auto.add("settings.viewport", viewport, "Settings");
+    app.auto.add("settings.content", egui::Rect::from_min_size(viewport.min, content), "Settings");
     app.dialog_state.settings_page = page;
     for a in acts {
         match a {

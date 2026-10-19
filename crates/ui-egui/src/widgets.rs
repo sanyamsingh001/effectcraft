@@ -44,6 +44,11 @@ pub fn hot_number_at(
         }
         return (er, out, out.is_some());
     }
+    // egui stops a drag when another pointer button is released. Keep the original
+    // primary scrub while Primary is still held; a middle-owned panel has a different id.
+    if ui.input(|i| i.pointer.primary_down() && i.pointer.button_released(egui::PointerButton::Middle)) && ui.ctx().drag_stopped_id() == Some(id) {
+        ui.ctx().set_dragged_id(id);
+    }
     let resp = ui.interact(rect, id, Sense::click_and_drag());
     let col = if resp.hovered() || resp.dragged() { t.accent_hover } else { t.hot_text };
     ui.painter().galley_with_override_text_color(rect.min + vec2(2.0, 2.0), galley, col);
@@ -75,7 +80,7 @@ pub fn hot_number_at(
     if resp.clicked() {
         ui.data_mut(|d| d.insert_temp(editing_id, format!("{value:.decimals$}")));
     }
-    (rect, out, resp.drag_stopped())
+    (rect, out, resp.drag_stopped_by(egui::PointerButton::Primary))
 }
 
 /// [`hot_number_at`] for a whole number (an angle's revolutions): a drag steps it once every
@@ -317,8 +322,48 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     s
 }
 
+/// Claim a middle-button drag before a panel's row/value controls, and return its movement.
+/// Keeping the drag's owner lets the pointer leave the panel until the button is released.
+pub fn middle_drag(ui: &Ui, id: egui::Id, area: Rect) -> egui::Vec2 {
+    let owner_id = egui::Id::new("middle-scroll-owner");
+    let (down, pressed, primary_down) =
+        ui.input(|i| (i.pointer.button_down(egui::PointerButton::Middle), i.pointer.button_pressed(egui::PointerButton::Middle), i.pointer.primary_down()));
+    if !down {
+        ui.data_mut(|d| d.remove::<egui::Id>(owner_id));
+        return egui::Vec2::ZERO;
+    }
+    let mut owner = ui.data(|d| d.get_temp::<egui::Id>(owner_id));
+    if !ui.is_enabled() || (primary_down && owner != Some(id)) {
+        return egui::Vec2::ZERO;
+    }
+    if pressed && owner.is_none() && ui.rect_contains_pointer(area.intersect(ui.clip_rect())) {
+        owner = Some(id);
+        ui.data_mut(|d| d.insert_temp(owner_id, id));
+        ui.ctx().set_dragged_id(id);
+    }
+    if owner != Some(id) {
+        return egui::Vec2::ZERO;
+    }
+    let _ = ui.interact(area, id, Sense::drag());
+    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    if pressed { egui::Vec2::ZERO } else { ui.input(|i| i.pointer.delta()) }
+}
+
+/// egui vertical scrolling with middle navigation captured before its controls are drawn.
+pub fn vertical_scroll_area<R>(ui: &mut Ui, id: egui::Id, scroll: egui::ScrollArea, body: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
+    let rect_id = id.with("middle-viewport");
+    let previous = ui.data(|d| d.get_temp::<Rect>(rect_id));
+    let delta = previous.map_or(egui::Vec2::ZERO, |area| middle_drag(ui, id, area));
+    if delta.y != 0.0 {
+        ui.scroll_with_delta(vec2(0.0, delta.y));
+    }
+    let output = scroll.show(ui, body);
+    ui.data_mut(|d| d.insert_temp(rect_id, output.inner_rect));
+    output
+}
+
 /// Vertical scrolling for a panel that lays out its own rows: [`PanelScroll::begin`] gives the
-/// offset to draw them at (moved by the mouse wheel over `area`), [`PanelScroll::end`] takes the
+/// offset to draw them at (moved by the mouse wheel or middle drag over `area`), [`PanelScroll::end`] takes the
 /// rows' height and draws a [`scroll_bar`] on the right edge while they overflow, so every
 /// panel can be scrolled without a wheel or touchpad (#271).
 pub struct PanelScroll {
@@ -335,6 +380,7 @@ impl PanelScroll {
         if ui.rect_contains_pointer(area) {
             offset -= ui.input(|i| i.smooth_scroll_delta.y);
         }
+        offset -= middle_drag(ui, id.with("middle-drag"), area).y;
         Self { id, area, offset: offset.clamp(0.0, max.max(0.0)) }
     }
 
@@ -385,6 +431,47 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
     })
 }
 
+/// A label menu row: the existing selectable button with a reserved colour square.
+pub fn label_menu_button(ui: &mut Ui, name: &str, color: Color32, selected: bool) -> Response {
+    use egui::AtomExt;
+    let response = ui.add(egui::Button::new(("".atom_size(vec2(14.0, 14.0)), name)).selected(selected));
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, response.enabled(), selected, name));
+    menu_swatch(ui, &response, color, 0.0);
+    response
+}
+
+/// Paint a label swatch inside the blank 14-point atom, after an optional check-mark gutter.
+pub(crate) fn menu_swatch(ui: &Ui, response: &Response, color: Color32, gutter: f32) {
+    let rect = Rect::from_center_size(pos2(response.rect.left() + ui.spacing().button_padding.x + gutter + 7.0, response.rect.center().y), vec2(10.0, 10.0));
+    ui.painter().rect_filled(rect, 2.0, color);
+}
+
+/// The Project label popup keeps its existing placement and selection, with colour references.
+pub fn label_popup_menu(
+    ui: &mut Ui,
+    auto: &mut Registry,
+    id: egui::Id,
+    pos: egui::Pos2,
+    options: &[(String, Color32)],
+    current: Option<usize>,
+) -> Option<usize> {
+    if !popup_is_open(ui, id) {
+        return None;
+    }
+    popup_list(ui, id, pos, Rect::NOTHING, options.len(), 0, |ui| {
+        ui.set_min_width(160.0);
+        let mut chosen = None;
+        for (i, (name, color)) in options.iter().enumerate() {
+            let response = label_menu_button(ui, name, *color, current == Some(i));
+            auto.add(&format!("project.labelMenu.{i}"), response.rect, name);
+            if response.clicked() {
+                chosen = Some(i);
+            }
+        }
+        chosen
+    })
+}
+
 /// The open popup list `id` at `pos`, drawn by `body` (`rows` entries and `seps` separators,
 /// for its height): as tall as the window allows, scrolling beyond with a scroll bar (a shape
 /// layer's Add menu has 20 entries, the blend modes 40, the fonts hundreds), and moved up when
@@ -423,9 +510,43 @@ pub fn menu_scroll<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 
 /// Whether a [`popup_menu`] is open (build its options only then: they can be long).
 pub fn popup_is_open(ui: &Ui, id: egui::Id) -> bool {
-    ui.data(|d| d.get_temp(id.with("open")).unwrap_or(false))
+    let open = ui.data(|d| d.get_temp(id.with("open")).unwrap_or(false));
+    if open {
+        track_popup(ui.ctx(), id);
+    }
+    open
 }
 
 pub fn open_popup(ui: &Ui, id: egui::Id) {
     ui.data_mut(|d| d.insert_temp(id.with("open"), true));
+    track_popup(ui.ctx(), id);
+}
+
+fn popup_owners_id(ctx: &egui::Context) -> egui::Id {
+    egui::Id::new(("custom-popup-owners", ctx.viewport_id()))
+}
+
+fn track_popup(ctx: &egui::Context, id: egui::Id) {
+    let key = popup_owners_id(ctx);
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|d| {
+        let mut owners = d.get_temp::<Vec<(egui::Id, u64)>>(key).unwrap_or_default();
+        owners.retain(|(owner, seen)| *owner != id && seen.saturating_add(1) >= frame);
+        owners.push((id, frame));
+        d.insert_temp(key, owners);
+    });
+}
+
+/// Custom popup Areas own shortcuts while they are open and still being drawn.
+/// Drop hidden panels' stale popup flags after a frame instead of blocking keys forever.
+pub(crate) fn custom_popup_is_any_open(ctx: &egui::Context) -> bool {
+    let key = popup_owners_id(ctx);
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|d| {
+        let Some(mut owners) = d.get_temp::<Vec<(egui::Id, u64)>>(key) else { return false };
+        owners.retain(|(id, seen)| seen.saturating_add(1) >= frame && d.get_temp::<bool>(id.with("open")).unwrap_or(false));
+        let open = !owners.is_empty();
+        d.insert_temp(key, owners);
+        open
+    })
 }

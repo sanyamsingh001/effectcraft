@@ -77,7 +77,7 @@ fn prefs_set_validates_keys_types_and_ranges() {
     assert!(p.set("general.nope", json!(1)).is_err());
     assert!(p.set("general.showToolTips", json!([1])).is_err());
     p.set("general.undoLevels", json!(500)).unwrap();
-    assert_eq!(p.general.undo_levels, 99);
+    assert_eq!(p.general.undo_levels, 500);
     p.set("general.undoLevels", json!("7")).unwrap();
     assert_eq!(p.general.undo_levels, 7);
     p.set("labels.0.color", json!("zzz")).unwrap();
@@ -154,6 +154,106 @@ fn undo_levels_are_honoured() {
     // Lowering the setting trims the history right away.
     s.execute("prefs.set", json!({"key": "general.undoLevels", "value": 1})).unwrap();
     assert!(s.history.undo.len() <= 1);
+}
+
+#[test]
+fn undo_and_redo_preserve_more_than_ninety_nine_edits() {
+    let mut s = session_with_comp();
+    s.history.clear();
+    s.execute("prefs.set", json!({"key": "general.undoLevels", "value": 128})).unwrap();
+    for i in 1..=140 {
+        s.execute("comp.settings", json!({"width": 320 + i})).unwrap();
+    }
+    assert_eq!(s.history.undo.len(), 128);
+    assert_eq!(s.active_comp().unwrap().width, 460);
+    for i in (12..140).rev() {
+        assert!(s.undo());
+        assert_eq!(s.active_comp().unwrap().width, 320 + i);
+    }
+    assert!(!s.undo());
+    assert_eq!(s.history.redo.len(), 128);
+    for i in 13..=140 {
+        assert!(s.redo());
+        assert_eq!(s.active_comp().unwrap().width, 320 + i);
+    }
+    assert!(!s.redo());
+    assert_eq!(s.history.undo.len(), 128);
+}
+
+#[test]
+fn lowering_undo_levels_trims_distant_redo_states_and_keeps_redo_bounded() {
+    let mut s = session_with_comp();
+    s.history.clear();
+    for i in 1..=20 {
+        s.execute("comp.settings", json!({"width": 320 + i})).unwrap();
+    }
+    for _ in 0..10 {
+        assert!(s.undo());
+    }
+    assert_eq!(s.active_comp().unwrap().width, 330);
+    assert_eq!(s.history.redo.len(), 10);
+    s.execute("prefs.set", json!({"key": "general.undoLevels", "value": 4})).unwrap();
+    assert_eq!(s.history.undo.len(), 4);
+    assert_eq!(s.history.redo.len(), 4);
+    for i in 331..=334 {
+        assert!(s.redo());
+        assert_eq!(s.active_comp().unwrap().width, i);
+        assert_eq!(s.history.undo.len(), 4);
+    }
+    assert!(!s.redo());
+    for _ in 0..4 {
+        assert!(s.undo());
+    }
+    assert!(!s.undo());
+    assert_eq!(s.active_comp().unwrap().width, 330);
+}
+
+#[test]
+fn undo_after_lowering_levels_keeps_only_the_nearest_redo_states() {
+    let mut s = session_with_comp();
+    s.history.clear();
+    for i in 1..=20 {
+        s.execute("comp.settings", json!({"width": 320 + i})).unwrap();
+    }
+    for _ in 0..10 {
+        assert!(s.undo());
+    }
+    s.execute("prefs.set", json!({"key": "general.undoLevels", "value": 4})).unwrap();
+    for i in (326..330).rev() {
+        assert!(s.undo());
+        assert_eq!(s.active_comp().unwrap().width, i);
+        assert_eq!(s.history.redo.len(), 4);
+    }
+    assert!(!s.undo());
+    for i in 327..=330 {
+        assert!(s.redo());
+        assert_eq!(s.active_comp().unwrap().width, i);
+    }
+    assert!(!s.redo());
+    assert_eq!(s.history.undo.len(), 4);
+}
+
+#[test]
+fn undo_level_preferences_are_bounded_and_malformed_values_are_safe() {
+    let mut p = Prefs::default();
+    assert_eq!(p.general.undo_levels, 32);
+    p.set("general.undoLevels", json!(u32::MAX)).unwrap();
+    assert_eq!(p.general.undo_levels, 1000);
+    p.set("general.undoLevels", json!(0)).unwrap();
+    assert_eq!(p.general.undo_levels, 1);
+    p.set("general.undoLevels", json!("1000")).unwrap();
+    assert_eq!(p.general.undo_levels, 1000);
+    p.set("general.undoLevels", json!(-1)).unwrap();
+    assert_eq!(p.general.undo_levels, 1);
+    p.set("general.undoLevels", json!(1000)).unwrap();
+    for value in [json!(u64::MAX), json!("many"), json!([1000]), json!(null)] {
+        assert!(p.set("general.undoLevels", value).is_err());
+        assert_eq!(p.general.undo_levels, 1000);
+    }
+    assert_eq!(Prefs::from_json(r#"{"general":{"undoLevels":4294967295}}"#).general.undo_levels, 1000);
+    assert_eq!(Prefs::from_json(r#"{"general":{"undoLevels":0}}"#).general.undo_levels, 1);
+    assert_eq!(Prefs::from_json(r#"{"general":{"undoLevels":-1}}"#).general.undo_levels, 32);
+    assert_eq!(Prefs::from_json(r#"{"general":{"undoLevels":"many"}}"#).general.undo_levels, 32);
 }
 
 #[test]
@@ -558,4 +658,28 @@ fn render_backend_says_why_it_renders_on_the_cpu() {
     s.accel_note = Some("headless: renders on the CPU unless started with --gpu".into());
     assert_eq!(why(&mut s), json!("headless: renders on the CPU unless started with --gpu"));
     assert_eq!(s.execute("render.backend", json!({"backend": "cpu"})).unwrap()["why"], json!("the project's renderer is Mercury Software Only"));
+}
+
+#[test]
+fn ui_scale_preferences_validate_and_survive_save_load() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut session = Session { config: Some(store.clone()), ..Default::default() };
+    assert_eq!(session.prefs.appearance.ui_scale, 1.0);
+    session.execute("prefs.set", json!({"key": "appearance.uiScale", "value": 1.5})).unwrap();
+    let mut loaded = Session { config: Some(store), ..Default::default() };
+    loaded.load_settings();
+    assert_eq!(loaded.prefs.appearance.ui_scale, 1.5);
+    assert_eq!(loaded.execute("prefs.get", json!({"key": "appearance.uiScale"})).unwrap(), json!(1.5));
+    for (input, expected) in [(-100.0, 0.75), (100.0, 2.0)] {
+        loaded.execute("prefs.set", json!({"key": "appearance.uiScale", "value": input})).unwrap();
+        assert_eq!(loaded.prefs.appearance.ui_scale, expected);
+    }
+    assert!(loaded.execute("prefs.set", json!({"key": "appearance.uiScale", "value": "invalid"})).is_err());
+    loaded.prefs.appearance.ui_scale = f64::NAN;
+    loaded.prefs.normalize();
+    assert_eq!(loaded.prefs.appearance.ui_scale, 1.0);
+    loaded.prefs.appearance.ui_scale = f64::INFINITY;
+    loaded.prefs.normalize();
+    assert_eq!(loaded.prefs.appearance.ui_scale, 1.0);
+    assert_eq!(Prefs::from_json(r#"{"appearance":{"theme":"dark"}}"#).appearance.ui_scale, 1.0);
 }

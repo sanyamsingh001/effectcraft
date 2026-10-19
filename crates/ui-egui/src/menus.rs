@@ -265,6 +265,73 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             None => Err("select a Render Queue item first".into()),
         };
     }
+    // UI key edits preserve the selected keys protected by Timeline locks. Engine commands
+    // retain their script behavior; the UI submits only the editable part of the selection.
+    let preserve_order =
+        matches!(id, "keys.easyEase" | "keys.easyEaseIn" | "keys.easyEaseOut" | "keys.toggleHold" | "keys.easePreset.apply" | "keys.timeReverse")
+            || (!no_params(&params) && matches!(id, "keys.interpolation" | "keys.velocity"));
+    if (preserve_order || matches!(id, "edit.clear" | "edit.cut" | "keys.delete"))
+        && params.get("layers").is_none()
+        && !app.session.state.selected_keys.is_empty()
+        && let Some(comp) = app.session.active_comp()
+    {
+        let (mut protected, editable): (Vec<_>, Vec<_>) =
+            app.session.state.selected_keys.iter().copied().partition(|key| comp.layer(key.layer).is_some_and(|layer| layer.switches.locked));
+        if !protected.is_empty() {
+            if editable.is_empty() {
+                return Ok(if id == "keys.easePreset.apply" { json!({"pairs": 0}) } else { json!(0) });
+            }
+            let comp_id = app.session.active_comp_id();
+            let before = app.session.project.clone();
+            let selected = std::mem::replace(&mut app.session.state.selected_keys, editable);
+            let result = run_engine(app, ctx, id, params);
+            if result.is_ok() {
+                protected.append(&mut app.session.state.selected_keys);
+                if preserve_order {
+                    // Metadata edits keep stored key indices, including when roving retimes them.
+                    // Time reversal instead maps each editable source key to its mirrored time.
+                    let old_comp = comp_id.and_then(|id| before.comp(id));
+                    let new_comp = app.session.active_comp();
+                    let mut reverse_bounds = std::collections::HashMap::new();
+                    if id == "keys.timeReverse" {
+                        for key in &selected {
+                            let Some(layer) = old_comp.and_then(|comp| comp.layer(key.layer)).filter(|layer| !layer.switches.locked) else { continue };
+                            let Some(prop) = layer.props.find(key.prop) else { continue };
+                            if prop.keys.binary_search_by_key(&key.time, |key| key.time).is_err() {
+                                continue;
+                            }
+                            let bounds = reverse_bounds.entry((key.layer, key.prop)).or_insert((key.time, key.time));
+                            bounds.0 = bounds.0.min(key.time);
+                            bounds.1 = bounds.1.max(key.time);
+                        }
+                    }
+                    let mut order = std::collections::HashMap::new();
+                    for (rank, key) in selected.iter().enumerate() {
+                        let old_prop = old_comp.and_then(|comp| comp.layer(key.layer)).and_then(|layer| layer.props.find(key.prop));
+                        let new_prop = new_comp.and_then(|comp| comp.layer(key.layer)).and_then(|layer| layer.props.find(key.prop));
+                        let remapped = if id == "keys.timeReverse" {
+                            let time = reverse_bounds.get(&(key.layer, key.prop)).map_or(key.time, |(lo, hi)| {
+                                let reversed = i128::from(lo.0) + i128::from(hi.0) - i128::from(key.time.0);
+                                effectcraft_engine::time::Tick(reversed.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
+                            });
+                            new_prop.and_then(|prop| prop.keys.binary_search_by_key(&time, |key| key.time).ok().and_then(|index| prop.keys.get(index)))
+                        } else {
+                            old_prop
+                                .zip(new_prop)
+                                .and_then(|(old, new)| old.keys.binary_search_by_key(&key.time, |key| key.time).ok().and_then(|index| new.keys.get(index)))
+                        };
+                        let key = remapped.map(|stored| effectcraft_engine::KeyRef { time: stored.time, ..*key }).unwrap_or(*key);
+                        order.entry(key).or_insert(rank);
+                    }
+                    protected.sort_by_key(|key| order.get(key).copied().unwrap_or(usize::MAX));
+                }
+                app.session.state.selected_keys = protected;
+            } else {
+                app.session.state.selected_keys = selected;
+            }
+            return result;
+        }
+    }
     let now = ctx.input(|i| i.time);
     // Closing a modified project asks to save it first; the command runs once answered.
     if crate::panels::unsaved::guard(app, id, &params) {
@@ -890,6 +957,7 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             let name = app.ui.workspace.clone();
             app.ui.saved_workspaces.insert(name.clone(), app.ui.dock.clone());
             app.ui.saved_floating.insert(name.clone(), app.ui.floating.clone());
+            app.save_workspaces()?;
             json!({"workspace": name})
         }
         "window.saveWorkspaceAs" => {
@@ -906,6 +974,7 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.ui.saved_workspaces.insert(name.clone(), app.ui.dock.clone());
             app.ui.saved_floating.insert(name.clone(), app.ui.floating.clone());
             app.ui.workspace = name.clone();
+            app.save_workspaces()?;
             json!({"workspace": name})
         }
         "window.editWorkspaces" => {
@@ -933,6 +1002,7 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
                 if app.ui.workspace == name {
                     app.set_workspace("Default");
                 }
+                app.save_workspaces()?;
                 return Ok(json!({"deleted": name}));
             }
             if let Some(new) = p.get("rename").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty() && *n != name) {
@@ -947,6 +1017,7 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
                 if app.ui.workspace == name {
                     app.ui.workspace = new.to_string();
                 }
+                app.save_workspaces()?;
                 return Ok(json!({"renamed": new}));
             }
             json!({"workspaces": app.workspace_names()})
@@ -1089,6 +1160,7 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
     enum Ask {
         Import,
         OpenProject,
+        Folder,
         Save(&'static str),
         Open(&'static [&'static str]),
     }
@@ -1100,7 +1172,7 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         "comp.saveFrameAs" => ("path", Ask::Save("Frame.png")),
         "comp.saveFrameAsPsd" => ("path", Ask::Save("Frame.psd")),
         "comp.saveFrameAsExr" => ("path", Ask::Save("Frame.exr")),
-        "file.watchFolder" if params.get("stop").is_none() => ("folder", Ask::Save("Watch Folder")),
+        "file.watchFolder" if params.get("stop").is_none() => ("folder", Ask::Folder),
         "anim.savePreset" => ("path", Ask::Save("Preset.ecpreset")),
         "anim.applyPreset" => ("path", Ask::Open(&["ecpreset", "json"])),
         "view.exportGuides" => ("path", Ask::Save("Guides.json")),
@@ -1113,7 +1185,7 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         "file.installScript" | "file.installScriptUIPanel" => ("path", Ask::Open(&["jsx", "js"])),
         "effect.plugins.load" if params.get("folder").is_none() => ("path", Ask::Open(&["wasm", "wat"])),
         "file.replaceFootage" => ("path", Ask::Import),
-        "file.collectFiles" => ("folder", Ask::Save("Collected Files")),
+        "file.collectFiles" => ("folder", Ask::Folder),
         "file.saveCopyAsXml" => ("path", Ask::Save("Untitled Project.ecprojx")),
         "keys.rpfCameraImport" => ("path", Ask::Open(&["json", "csv", "txt"])),
         "essential.exportTemplate" => ("path", Ask::Save("Template.ectemplate")),
@@ -1151,9 +1223,16 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
             let Some(f) = app.hooks.pick_files.as_ref() else { return Some(Err("no file dialog available (pass `path`)".into())) };
             f(exts).first().map(|s| json!(s))
         }
+        Ask::Folder => {
+            let Some(f) = app.hooks.pick_folder.as_ref() else { return Some(Err("no folder dialog available (pass `folder`)".into())) };
+            f().map(|s| json!(s))
+        }
         Ask::Save(default) => {
-            let Some(f) = app.hooks.pick_save.as_ref() else { return Some(Err("no file dialog available (pass `path`)".into())) };
-            f(default).map(|s| json!(s))
+            let ext = std::path::Path::new(default).extension().and_then(|e| e.to_str()).unwrap_or("");
+            let picked =
+                if ext == "ecproj" { app.hooks.pick_save.as_ref().map(|f| f(default)) } else { app.hooks.pick_save_file.as_ref().map(|f| f(default, ext)) };
+            let Some(picked) = picked else { return Some(Err("no file dialog available (pass `path`)".into())) };
+            picked.map(|s| json!(s))
         }
     };
     let Some(v) = picked else { return Some(Ok(Value::Null)) };
@@ -1415,14 +1494,17 @@ fn space_tap_id() -> egui::Id {
 
 /// Dispatch keyboard shortcuts (skipped while typing in a text field).
 pub fn handle_shortcuts(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let popup_open = egui::Popup::is_any_open(ctx) || crate::widgets::custom_popup_is_any_open(ctx);
     // Dialog cancellation owns Escape even when a text field has keyboard focus.
     if app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        if crate::panels::shortcut_editor::recording(app) || egui::Popup::is_any_open(ctx) {
+        if crate::panels::shortcut_editor::recording(app) || popup_open {
             return;
         }
         ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if app.dialog == Some(crate::Dialog::LayerStyles) {
             crate::panels::layer_styles_dialog::finish(app, false);
+        } else if app.dialog == Some(crate::Dialog::Info) {
+            crate::panels::forms::close_info(app);
         } else {
             if app.dialog == Some(crate::Dialog::Settings)
                 && let Some(p) = app.dialog_state.prefs_snapshot.take()
@@ -1435,6 +1517,11 @@ pub fn handle_shortcuts(app: &mut EffectcraftApp, ctx: &egui::Context) {
             }
             app.dialog = None;
         }
+        return;
+    }
+    // Open menus own keyboard input, including Spacebar and destructive shortcuts.
+    if popup_open {
+        ctx.data_mut(|d| d.remove::<bool>(space_tap_id()));
         return;
     }
     // A mouse button down while Spacebar is held belongs to the Hand tool: its release won't
@@ -1492,6 +1579,10 @@ pub fn handle_shortcuts(app: &mut EffectcraftApp, ctx: &egui::Context) {
             if crate::panels::shortcut_editor::recording(app) {
                 continue;
             }
+            if app.dialog == Some(crate::Dialog::Info) {
+                crate::panels::forms::close_info(app);
+                continue;
+            }
             // Escape in Settings is Cancel: restore the settings from when it opened.
             if app.dialog == Some(crate::Dialog::Settings)
                 && let Some(p) = app.dialog_state.prefs_snapshot.take()
@@ -1539,6 +1630,7 @@ pub fn handle_shortcuts(app: &mut EffectcraftApp, ctx: &egui::Context) {
 pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let mut clicked: Option<(String, Value)> = None;
+    let mut top_menus = Vec::new();
     ui.horizontal_centered(|ui| {
         ui.add_space(6.0);
         egui::MenuBar::new().ui(ui, |ui| {
@@ -1549,10 +1641,25 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                         crate::widgets::menu_scroll(ui, |ui| menu_nodes(app, ui, children, &mut clicked));
                     });
                     app.auto.add(&format!("menu.{label}"), r.response.rect, label);
+                    top_menus.push(r.response);
                 }
             }
         });
     });
+    // A submenu consumes Left/Right itself. At a top-level menu they switch menu headings.
+    if let Some(active) = top_menus.iter().position(|r| egui::Popup::is_id_open(&ctx, egui::Popup::default_response_id(r))) {
+        let right = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight));
+        let left = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft));
+        if (right || left) && !top_menus.is_empty() {
+            let next = if right { (active + 1) % top_menus.len() } else { (active + top_menus.len() - 1) % top_menus.len() };
+            if let Some(response) = top_menus.get(next) {
+                let id = egui::Popup::default_response_id(response);
+                egui::Popup::open_id(&ctx, id);
+                ctx.data_mut(|d| d.insert_temp(id.with("keyboard-enter"), true));
+                ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+            }
+        }
+    }
     if let Some((id, params)) = clicked
         && let Err(e) = invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params })
     {
@@ -1573,6 +1680,7 @@ pub(crate) fn menu_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, name: &
 }
 
 fn menu_nodes(app: &mut EffectcraftApp, ui: &mut egui::Ui, nodes: &[MenuNode], clicked: &mut Option<(String, Value)>) {
+    let mut entries = Vec::new();
     for n in nodes {
         match n {
             MenuNode::Separator => {
@@ -1583,13 +1691,13 @@ fn menu_nodes(app: &mut EffectcraftApp, ui: &mut egui::Ui, nodes: &[MenuNode], c
                 // saved workspaces.
                 let ws = app.ui.workspace.clone();
                 let saved = app.saved_workspace_names();
-                let (entries, empty) = effectcraft_engine::menus::dynamic(&app.session, name, &dyn_ctx(&ws, &saved));
-                if entries.is_empty()
+                let (items, empty) = effectcraft_engine::menus::dynamic(&app.session, name, &dyn_ctx(&ws, &saved));
+                if items.is_empty()
                     && let Some(e) = empty
                 {
                     ui.add_enabled(false, egui::Button::new((gutter(false), e)));
                 }
-                for (i, e) in entries.iter().enumerate() {
+                for (i, e) in items.iter().enumerate() {
                     let tip = match name.as_str() {
                         "recentProjects" => app.session.prefs.recent_projects.get(i).cloned(),
                         "recentFootage" => app.session.prefs.recent_footage.get(i).cloned(),
@@ -1601,7 +1709,9 @@ fn menu_nodes(app: &mut EffectcraftApp, ui: &mut egui::Ui, nodes: &[MenuNode], c
                         Some(t) => r.on_hover_text(t),
                         None => r,
                     };
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, r.enabled(), &e.label));
                     app.auto.add(&format!("menu.{name}.{i}"), r.rect, &e.label);
+                    entries.push((r.clone(), false));
                     if r.clicked() {
                         *clicked = Some((e.command.clone(), e.params.clone()));
                         ui.close();
@@ -1611,18 +1721,77 @@ fn menu_nodes(app: &mut EffectcraftApp, ui: &mut egui::Ui, nodes: &[MenuNode], c
             MenuNode::Submenu { label, children } => {
                 let ws = app.ui.workspace.clone();
                 let shown = crate::i18n::submenu(app, label, effectcraft_engine::menus::submenu_label(&app.session, label, &dyn_ctx(&ws, &[])));
-                ui.menu_button((gutter(false), shown.as_str()), |ui| {
+                let parent = (egui::containers::menu::find_menu_root(ui).id, ui.next_auto_id());
+                let r = ui.menu_button((gutter(false), shown.as_str()), |ui| {
+                    let child = egui::containers::menu::find_menu_root(ui).id;
+                    ui.data_mut(|d| d.insert_temp(child.with("keyboard-parent"), parent));
                     ui.set_min_width(if children.len() > 30 { 200.0 } else { 240.0 });
                     crate::widgets::menu_scroll(ui, |ui| menu_nodes(app, ui, children, clicked));
                 });
+                r.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, r.response.enabled(), &shown));
+                if r.response.clicked() && !r.response.clicked_by(egui::PointerButton::Primary) {
+                    let child = egui::containers::menu::SubMenu::id_from_widget_id(r.response.id);
+                    ui.data_mut(|d| d.insert_temp(child.with("keyboard-enter"), true));
+                }
+                entries.push((r.response, true));
             }
             MenuNode::Item(e) => {
-                if menu_entry(app, ui, e) {
+                let r = menu_entry(app, ui, e);
+                if r.clicked() {
                     *clicked = Some((e.command.clone(), e.params.clone()));
                     ui.close();
                 }
+                entries.push((r, false));
             }
         }
+    }
+    menu_keyboard(ui, &entries);
+}
+
+/// Keep arrow navigation within the deepest menu, skipping unavailable entries and scrolling
+/// the focused item into view. Buttons retain egui's Enter/Space/accessibility activation.
+fn menu_keyboard(ui: &mut egui::Ui, entries: &[(egui::Response, bool)]) {
+    use egui::containers::menu::{MenuState, SubMenu, find_menu_root};
+    let root = find_menu_root(ui).id;
+    if !MenuState::is_deepest_open_sub_menu(ui.ctx(), root) {
+        return;
+    }
+    let enabled: Vec<_> = entries.iter().filter(|(r, _)| r.enabled()).collect();
+    let focused = enabled.iter().position(|(r, _)| r.has_focus());
+    // Keep the initial focus request while a new popup measures its invisible rows.
+    let enter = !ui.is_sizing_pass() && ui.data_mut(|d| d.remove_temp::<bool>(root.with("keyboard-enter"))).unwrap_or(false);
+    let down = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+    let up = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+    if (enter || down || up) && !enabled.is_empty() {
+        let index = match focused {
+            Some(i) if !enter && down => (i + 1) % enabled.len(),
+            Some(i) if !enter && up => (i + enabled.len() - 1) % enabled.len(),
+            _ if up => enabled.len() - 1,
+            _ => 0,
+        };
+        if let Some((response, _)) = enabled.get(index) {
+            response.request_focus();
+            response.scroll_to_me(Some(egui::Align::Center));
+            ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        }
+    }
+    if let Some((response, true)) = focused.and_then(|i| enabled.get(i)).copied()
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
+    {
+        let child = SubMenu::id_from_widget_id(response.id);
+        MenuState::mark_shown(ui.ctx(), child);
+        MenuState::from_id(ui.ctx(), root, |state| state.open_item = Some(child));
+        ui.data_mut(|d| d.insert_temp(child.with("keyboard-enter"), true));
+        ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+    }
+    if let Some((parent, button)) = ui.data(|d| d.get_temp::<(egui::Id, egui::Id)>(root.with("keyboard-parent")))
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
+    {
+        MenuState::from_id(ui.ctx(), parent, |state| state.open_item = None);
+        ui.memory_mut(|m| {
+            m.request_focus(button);
+            m.move_focus(egui::FocusDirection::None);
+        });
     }
 }
 
@@ -1637,13 +1806,26 @@ fn gutter(checked: bool) -> egui::Atom<'static> {
     (if checked { "✔" } else { "" }).atom_size(egui::vec2(14.0, 14.0))
 }
 
-fn menu_entry(app: &EffectcraftApp, ui: &mut egui::Ui, e: &MenuEntry) -> bool {
+fn menu_entry(app: &EffectcraftApp, ui: &mut egui::Ui, e: &MenuEntry) -> egui::Response {
     let label = entry_label(app, e);
-    let mut b = egui::Button::new((gutter(entry_checked(app, e) == Some(true)), label));
+    use egui::AtomExt;
+    let color =
+        (e.command == "edit.label").then(|| e.params.get("label").and_then(Value::as_str).and_then(effectcraft_engine::color::Label::from_name)).flatten();
+    let checked = entry_checked(app, e) == Some(true);
+    let mut b = if color.is_some() {
+        egui::Button::new((gutter(checked), "".atom_size(egui::vec2(14.0, 14.0)), label.as_str()))
+    } else {
+        egui::Button::new((gutter(checked), label.as_str()))
+    };
     if let Some(s) = entry_shortcut(app, e) {
         b = b.shortcut_text(shortcut_text(&s));
     }
-    ui.add_enabled(entry_enabled(app, e), b).clicked()
+    let response = ui.add_enabled(entry_enabled(app, e), b);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), &label));
+    if let Some(label) = color {
+        crate::widgets::menu_swatch(ui, &response, app.tokens.label(label), 14.0 + ui.spacing().item_spacing.x);
+    }
+    response
 }
 
 #[cfg(test)]

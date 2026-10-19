@@ -172,13 +172,38 @@ pub enum SplitSize {
     FixedB(f32),
 }
 
-/// One panel in a [`DockNode::Stack`].
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// One expandable panel group in a [`DockNode::Stack`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StackEntry {
     pub panel: PanelKind,
     pub open: bool,
     /// Content height when open (set by dragging the gaps); `None` = share the remaining height.
     pub height: Option<f32>,
+    /// Tabs or a split occupying this slot. Old single-panel workspaces omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<Box<DockNode>>,
+}
+
+impl StackEntry {
+    fn contains(&self, p: PanelKind) -> bool {
+        self.group.as_deref().map_or(self.panel == p, |n| n.contains(p))
+    }
+
+    fn panels(&self, out: &mut Vec<PanelKind>) {
+        if let Some(n) = self.group.as_deref() {
+            n.panels(out);
+        } else {
+            out.push(self.panel);
+        }
+    }
+
+    fn group_mut(&mut self) -> &mut DockNode {
+        self.group.get_or_insert_with(|| Box::new(tabs(&[self.panel], 0)))
+    }
+
+    fn is_tab_group(&self) -> bool {
+        self.group.as_deref().is_none_or(|n| matches!(n, DockNode::Tabs { .. }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -206,7 +231,7 @@ fn tabs(p: &[PanelKind], active: usize) -> DockNode {
     DockNode::Tabs { panels: p.to_vec(), active }
 }
 fn stack(e: &[(PanelKind, bool, Option<f32>)]) -> DockNode {
-    DockNode::Stack { entries: e.iter().map(|&(panel, open, height)| StackEntry { panel, open, height }).collect() }
+    DockNode::Stack { entries: e.iter().map(|&(panel, open, height)| StackEntry { panel, open, height, group: None }).collect() }
 }
 fn hsplit(size: SplitSize, a: DockNode, b: DockNode) -> DockNode {
     DockNode::Split { vertical: false, size, a: Box::new(a), b: Box::new(b) }
@@ -406,7 +431,7 @@ impl DockNode {
                 b.panels(out);
             }
             DockNode::Tabs { panels, .. } => out.extend(panels.iter().copied()),
-            DockNode::Stack { entries } => out.extend(entries.iter().map(|e| e.panel)),
+            DockNode::Stack { entries } => entries.iter().for_each(|e| e.panels(out)),
         }
     }
     pub fn contains(&self, p: PanelKind) -> bool {
@@ -426,9 +451,12 @@ impl DockNode {
                     false
                 }
             }
-            DockNode::Stack { entries } => match entries.iter_mut().find(|e| e.panel == p) {
+            DockNode::Stack { entries } => match entries.iter_mut().find(|e| e.contains(p)) {
                 Some(e) => {
                     e.open = true;
+                    if let Some(n) = e.group.as_deref_mut() {
+                        n.activate(p);
+                    }
                     true
                 }
                 None => false,
@@ -440,11 +468,12 @@ impl DockNode {
         match self {
             DockNode::Split { a, b, .. } => a.toggle_stacked(p) || b.toggle_stacked(p),
             DockNode::Tabs { .. } => false,
-            DockNode::Stack { entries } => match entries.iter_mut().find(|e| e.panel == p) {
-                Some(e) => {
+            DockNode::Stack { entries } => match entries.iter_mut().find(|e| e.contains(p)) {
+                Some(e) if e.is_tab_group() => {
                     e.open = !e.open;
                     true
                 }
+                Some(e) => e.group.as_deref_mut().is_some_and(|n| n.toggle_stacked(p)),
                 None => false,
             },
         }
@@ -453,7 +482,7 @@ impl DockNode {
         match self {
             DockNode::Split { a, b, .. } => a.is_visible(p) || b.is_visible(p),
             DockNode::Tabs { panels, active } => panels.get(*active) == Some(&p),
-            DockNode::Stack { entries } => entries.iter().any(|e| e.panel == p && e.open),
+            DockNode::Stack { entries } => entries.iter().any(|e| e.open && e.group.as_deref().map_or(e.panel == p, |n| n.is_visible(p))),
         }
     }
     /// Close a panel (remove its tab; empty groups collapse their split).
@@ -472,10 +501,18 @@ impl DockNode {
                 *self = (**a).clone();
             }
         } else if let DockNode::Tabs { panels, active } = self {
+            let shown = panels.get(*active).copied();
             panels.retain(|x| *x != p);
-            *active = (*active).min(panels.len().saturating_sub(1));
+            *active = shown.and_then(|shown| panels.iter().position(|x| *x == shown)).unwrap_or((*active).min(panels.len().saturating_sub(1)));
         } else if let DockNode::Stack { entries } = self {
-            entries.retain(|e| e.panel != p);
+            entries.retain_mut(|e| {
+                if let Some(n) = e.group.as_deref_mut() {
+                    n.close(p);
+                    n.panel_count() > 0
+                } else {
+                    e.panel != p
+                }
+            });
         }
     }
     /// Add a panel as a tab next to `near` (or into the first group).
@@ -496,17 +533,23 @@ impl DockNode {
                         false
                     }
                 }
-                DockNode::Stack { entries } => match entries.iter().position(|e| e.panel == near) {
+                DockNode::Stack { entries } => match entries.iter().position(|e| e.contains(near)) {
                     Some(i) => {
-                        entries.insert(i + 1, StackEntry { panel: p, open: true, height: None });
+                        entries.insert(i + 1, StackEntry { panel: p, open: true, height: None, group: None });
                         true
                     }
                     None => false,
                 },
             }
         }
-        if !add(self, p, near) && !add(self, p, PanelKind::EffectsPresets) {
-            add(self, p, PanelKind::Project);
+        if !add(self, p, near) && !add(self, p, PanelKind::EffectsPresets) && !add(self, p, PanelKind::Project) {
+            let mut existing = Vec::new();
+            self.panels(&mut existing);
+            if let Some(first) = existing.first().copied() {
+                add(self, p, first);
+            } else {
+                *self = tabs(&[p], 0);
+            }
         }
     }
 }
@@ -583,7 +626,11 @@ impl DockNode {
             let here = match n {
                 DockNode::Split { a, b, .. } => return rec(a, p, anchor, zone) || rec(b, p, anchor, zone),
                 DockNode::Tabs { panels, .. } => panels.contains(&anchor),
-                DockNode::Stack { entries } => entries.iter().any(|e| e.panel == anchor),
+                DockNode::Stack { entries } => {
+                    let Some(e) = entries.iter_mut().find(|e| e.contains(anchor)) else { return false };
+                    e.open = true;
+                    return rec(e.group_mut(), p, anchor, zone);
+                }
             };
             if !here {
                 return false;
@@ -593,10 +640,6 @@ impl DockNode {
                     let i = panels.iter().position(|x| *x == anchor).map_or(panels.len(), |i| i + 1);
                     panels.insert(i, p);
                     *active = i;
-                }
-                (Zone::Center, DockNode::Stack { entries }) => {
-                    let i = entries.iter().position(|e| e.panel == anchor).map_or(entries.len(), |i| i + 1);
-                    entries.insert(i, StackEntry { panel: p, open: true, height: None });
                 }
                 (z, node) => {
                     let new = tabs(&[p], 0);
@@ -633,10 +676,10 @@ impl DockNode {
                     *active = i;
                     true
                 }
-                DockNode::Stack { entries } if entries.iter().any(|e| e.panel == anchor) => {
-                    let i = before.and_then(|b| entries.iter().position(|e| e.panel == b)).unwrap_or(entries.len());
-                    entries.insert(i, StackEntry { panel: p, open: true, height: None });
-                    true
+                DockNode::Stack { entries } => {
+                    let Some(e) = entries.iter_mut().find(|e| e.contains(anchor)) else { return false };
+                    e.open = true;
+                    rec(e.group_mut(), p, anchor, before)
                 }
                 _ => false,
             }
@@ -655,7 +698,10 @@ impl DockNode {
             match n {
                 DockNode::Split { a, b, .. } => rec(a, p, &format!("{path}a")).or_else(|| rec(b, p, &format!("{path}b"))),
                 DockNode::Tabs { panels, .. } => panels.contains(&p).then(|| path.to_string()),
-                DockNode::Stack { entries } => entries.iter().position(|e| e.panel == p).map(|i| format!("{path}s{i}")),
+                DockNode::Stack { entries } => entries.iter().enumerate().find_map(|(i, e)| {
+                    let path = format!("{path}s{i}");
+                    e.group.as_deref().map_or_else(|| (e.panel == p).then(|| path.clone()), |n| rec(n, p, &path))
+                }),
             }
         }
         rec(self, p, "")
@@ -697,8 +743,9 @@ impl Layout {
         let mut found = false;
         for f in &mut self.floating {
             if let Some(i) = f.panels.iter().position(|x| *x == p) {
+                let shown = f.panels.get(f.active).copied();
                 f.panels.remove(i);
-                f.active = f.active.min(f.panels.len().saturating_sub(1));
+                f.active = shown.and_then(|shown| f.panels.iter().position(|x| *x == shown)).unwrap_or(f.active.min(f.panels.len().saturating_sub(1)));
                 found = true;
             }
         }
@@ -844,8 +891,15 @@ pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, pa
     match node {
         DockNode::Tabs { panels, active } => {
             let tab_h = if panels.len() == 1 && panels[0].compact() { 8.0 } else { t.tab_h };
-            let content = Rect::from_min_max(pos2(rect.min.x, rect.min.y + tab_h), rect.max);
-            out.push(Group { path: path.to_string(), rect, content, panels: panels.clone(), active: *active, stacked: None });
+            let content = Rect::from_min_max(pos2(rect.min.x, (rect.min.y + tab_h).min(rect.max.y)), rect.max);
+            out.push(Group {
+                path: path.to_string(),
+                rect,
+                content,
+                panels: panels.clone(),
+                active: (*active).min(panels.len().saturating_sub(1)),
+                stacked: None,
+            });
         }
         DockNode::Stack { entries } => {
             // A header for every entry; the open panels' bodies share the rest.
@@ -856,21 +910,49 @@ pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, pa
             let bodies = stack_bodies(entries, avail);
             let mut y = rect.min.y;
             let mut drag = None;
-            for (i, e) in entries.iter().enumerate() {
+            // Find resize neighbours once, without rescanning the stack for each header.
+            let mut next_open = None;
+            let mut below: Vec<_> = entries
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(i, e)| {
+                    let next = next_open;
+                    if e.open {
+                        next_open = Some(i);
+                    }
+                    next
+                })
+                .collect();
+            below.reverse();
+            let mut above = None;
+            for (i, e) in entries.iter_mut().enumerate() {
+                if e.open {
+                    above = Some(i);
+                }
                 let body = bodies.get(i).copied().unwrap_or(0.0);
-                let r = Rect::from_min_max(pos2(rect.min.x, y), pos2(rect.max.x, (y + head + body).min(rect.max.y)));
-                let content = Rect::from_min_max(pos2(r.min.x, r.min.y + head), r.max);
+                let r = Rect::from_min_max(pos2(rect.min.x, y.min(rect.max.y)), pos2(rect.max.x, (y + head + body).min(rect.max.y)));
+                let content = Rect::from_min_max(pos2(r.min.x, (r.min.y + head).min(r.max.y)), r.max);
                 let group = format!("{path}s{i}");
                 // The gap below a panel resizes the open panels on either side of it.
-                let above = entries.get(..=i).and_then(|s| s.iter().rposition(|x| x.open));
-                let below = entries.get(i + 1..).and_then(|s| s.iter().position(|x| x.open)).map(|k| i + 1 + k);
-                if let (Some(above), Some(below)) = (above, below) {
+                if let (Some(above), Some(below)) = (above, below.get(i).copied().flatten()) {
                     let gap = Rect::from_min_max(pos2(rect.min.x, r.max.y), pos2(rect.max.x, r.max.y + g));
                     if let Some(d) = gutter(ui, gap, true, &group, t, reg) {
                         drag = Some((above, below, d));
                     }
                 }
-                out.push(Group { path: group, rect: r, content, panels: vec![e.panel], active: 0, stacked: Some(e.open) });
+                match e.group.as_deref_mut() {
+                    Some(DockNode::Tabs { panels, active }) => out.push(Group {
+                        path: group,
+                        rect: r,
+                        content,
+                        panels: panels.clone(),
+                        active: (*active).min(panels.len().saturating_sub(1)),
+                        stacked: Some(e.open),
+                    }),
+                    Some(n) => layout(ui, n, r, t, &group, out, reg),
+                    None => out.push(Group { path: group, rect: r, content, panels: vec![e.panel], active: 0, stacked: Some(e.open) }),
+                }
                 y = r.max.y + g;
             }
             if let Some((above, below, d)) = drag {
@@ -878,15 +960,17 @@ pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, pa
             }
         }
         DockNode::Split { vertical, size, a, b } => {
-            let g = t.gap;
             let total = if *vertical { rect.height() } else { rect.width() };
+            let g = t.gap.min(total.max(0.0));
             let avail = (total - g).max(0.0);
-            let first = match *size {
+            // In a short/narrow parent, share what fits instead of reversing clamp's bounds.
+            let min = 40.0_f32.min(avail / 2.0);
+            let wanted = match *size {
                 SplitSize::Ratio(r) => avail * r,
-                SplitSize::FixedA(px) => px.min(avail - 20.0),
-                SplitSize::FixedB(px) => avail - px.min(avail - 20.0),
-            }
-            .clamp(20.0_f32.min(avail), (avail - 20.0).max(0.0));
+                SplitSize::FixedA(px) => px,
+                SplitSize::FixedB(px) => avail - px,
+            };
+            let first = if wanted.is_finite() { wanted.clamp(min, avail - min) } else { avail / 2.0 };
             let (ra, gutter_rect, rb) = if *vertical {
                 (
                     Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + first)),
@@ -901,7 +985,7 @@ pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, pa
                 )
             };
             if let Some(d) = gutter(ui, gutter_rect, *vertical, path, t, reg) {
-                let nf = (first + d).clamp(40.0, (avail - 40.0).max(40.0));
+                let nf = (first + d).clamp(min, avail - min);
                 *size = match *size {
                     SplitSize::Ratio(_) => SplitSize::Ratio(nf / avail.max(1.0)),
                     SplitSize::FixedA(_) => SplitSize::FixedA(nf),
@@ -1036,7 +1120,20 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
             }
         }
         let ai = entries.iter().position(|e| e.active).unwrap_or(0);
-        let strip = Rect::from_min_size(g.rect.min, vec2(g.rect.width(), t.tab_h));
+        let strip = Rect::from_min_size(g.rect.min, vec2(g.rect.width(), t.tab_h.min(g.rect.height())));
+        if g.stacked.is_some()
+            && let Some(p) = active_panel
+        {
+            let header = ui.interact(strip, egui::Id::new(("stack-header", g.path.clone())), Sense::click_and_drag());
+            reg.add(&format!("panel.header.{}", p.id()), strip, "panel header");
+            if header.clicked() {
+                out.actions.push(DockAction::ToggleStacked(p));
+                out.actions.push(DockAction::Focus(p));
+            }
+            if header.drag_started() {
+                out.actions.push(DockAction::BeginDrag(p));
+            }
+        }
         if t.gradients {
             // Settings ▸ Appearance ▸ Use Gradients.
             crate::theme::gradient_rect(&painter, strip.shrink2(vec2(t.radius, 0.0)), t.grad_top(t.panel_bg), t.panel_bg);
@@ -1152,7 +1249,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
                 }
             }
             if resp.clicked() {
-                if g.stacked.is_some() {
+                if g.stacked.is_some() && k == ai && e.doc.is_none() {
                     out.actions.push(DockAction::ToggleStacked(*p));
                 } else {
                     out.actions.push(activate(e));
@@ -1208,7 +1305,7 @@ mod tests {
     }
 
     fn entry(panel: PanelKind, open: bool, height: Option<f32>) -> StackEntry {
-        StackEntry { panel, open, height }
+        StackEntry { panel, open, height, group: None }
     }
 
     fn close_to(a: &[f32], b: &[f32]) -> bool {
@@ -1388,6 +1485,71 @@ mod tests {
         assert_eq!(m, tabs(&[Composition, Project], 1));
     }
 
+    /// #302: a stack slot owns its tabs and splits independently of adjacent slots.
+    #[test]
+    fn stacked_slots_keep_tabs_and_splits_local() {
+        use PanelKind::*;
+        let mut d = stack(&[(Preview, true, Some(46.0)), (Properties, true, None), (Align, false, None), (Audio, false, None)]);
+        assert!(d.insert_tab(Align, Properties, None));
+        assert_eq!(d.path_of(Align), d.path_of(Properties));
+        assert!(d.is_visible(Align) && !d.is_visible(Properties));
+        assert!(d.activate(Properties));
+        assert!(d.is_visible(Properties) && !d.is_visible(Align));
+        assert!(d.toggle_stacked(Properties));
+        assert!(!d.is_visible(Properties));
+        assert!(d.activate(Align));
+        assert!(d.is_visible(Align));
+        let before = (d.path_of(Preview), d.path_of(Audio));
+        assert!(d.dock_panel(Tracker, Properties, Zone::Right));
+        assert_eq!((d.path_of(Preview), d.path_of(Audio)), before);
+        assert_eq!(d.path_of(Align), d.path_of(Properties));
+        assert_eq!(d.path_of(Tracker), Some("s1b".into()));
+        assert_eq!(d.path_of(Properties), Some("s1a".into()));
+        assert!(d.is_visible(Tracker));
+        // Closing a split restores the stacked tab group; closing its original panel leaves
+        // the other tab available to activate and collapse.
+        d.close(Tracker);
+        d.close(Properties);
+        assert!(d.activate(Align) && d.toggle_stacked(Align));
+        assert!(!d.is_visible(Align));
+        let text = serde_json::to_string(&d).unwrap();
+        assert_eq!(serde_json::from_str::<DockNode>(&text).unwrap(), d);
+        let legacy = r#"{"Stack":{"entries":[{"panel":"Audio","open":false,"height":null}]}}"#;
+        let old = serde_json::from_str::<DockNode>(legacy).unwrap();
+        assert!(old.contains(Audio) && !old.is_visible(Audio));
+    }
+
+    /// #306: a split smaller than its two minimum sizes used to panic in f32::clamp.
+    #[test]
+    fn tiny_nested_splits_have_valid_content_rectangles() {
+        let ctx = egui::Context::default();
+        for points in [0.0, 1.0, 10.0, 20.0, 30.0, 40.0, 80.0] {
+            for size in [SplitSize::Ratio(0.5), SplitSize::Ratio(f32::NAN), SplitSize::FixedA(300.0), SplitSize::FixedB(300.0)] {
+                let mut tree = vsplit(size, hsplit(size, tabs(&[PanelKind::Project], 0), tabs(&[PanelKind::Composition], 0)), tabs(&[PanelKind::Timeline], 0));
+                let mut groups = vec![];
+                let mut registry = crate::automation::Registry::default();
+                let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    layout(
+                        ui,
+                        &mut tree,
+                        Rect::from_min_size(pos2(0.0, 0.0), vec2(points, points)),
+                        &Tokens::for_kind(crate::theme::ThemeKind::Dark),
+                        "",
+                        &mut groups,
+                        &mut registry,
+                    );
+                });
+                assert_eq!(groups.len(), 3);
+                for g in &groups {
+                    for r in [g.rect, g.content] {
+                        assert!(r.is_finite() && r.width() >= 0.0 && r.height() >= 0.0, "{points} {size:?}: {r:?}");
+                        assert!(r.min.x >= 0.0 && r.min.y >= 0.0 && r.max.x <= points && r.max.y <= points);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn floating_layout_round_trips() {
         use PanelKind::*;
@@ -1424,5 +1586,134 @@ mod tests {
         let back: DockNode = serde_json::from_str(&s).unwrap();
         assert_eq!(back, d);
         assert_eq!(PanelKind::from_name("effects & presets"), Some(PanelKind::EffectsPresets));
+    }
+
+    #[test]
+    fn closing_earlier_inactive_tab_keeps_the_shown_panel() {
+        use PanelKind::*;
+        let mut d = tabs(&[Properties, Align, EffectsPresets], 1);
+        d.close(Properties);
+        assert!(d.is_visible(Align), "closing an inactive tab keeps the shown panel");
+        assert!(!d.is_visible(EffectsPresets));
+        assert_eq!(d.panel_count(), 2);
+    }
+
+    #[test]
+    fn closing_active_tab_keeps_existing_neighbor_choice() {
+        use PanelKind::*;
+        for (active, closed, shown) in [(0, Properties, Align), (1, Align, EffectsPresets), (2, EffectsPresets, Align)] {
+            let mut d = tabs(&[Properties, Align, EffectsPresets], active);
+            d.close(closed);
+            assert!(d.is_visible(shown), "active {active}: {closed:?} -> {shown:?}");
+        }
+    }
+
+    #[test]
+    fn close_normalizes_invalid_active_and_collapses_empty_splits() {
+        use PanelKind::*;
+        let mut d = tabs(&[Properties, Align, EffectsPresets], usize::MAX);
+        d.close(History);
+        assert!(d.is_visible(EffectsPresets));
+        d.close(Properties);
+        assert!(d.is_visible(EffectsPresets));
+        d.close(EffectsPresets);
+        assert!(d.is_visible(Align));
+        d.close(Align);
+        assert_eq!(d, tabs(&[], 0));
+        let mut d = DockNode::Split { vertical: true, size: SplitSize::Ratio(0.5), a: Box::new(tabs(&[Properties], 0)), b: Box::new(tabs(&[Align], 0)) };
+        d.close(Properties);
+        assert_eq!(d, tabs(&[Align], 0));
+        d.close(Align);
+        assert_eq!(d, tabs(&[], 0));
+    }
+
+    #[test]
+    fn closing_inactive_tab_in_stack_keeps_the_shown_panel() {
+        use PanelKind::*;
+        let mut d = DockNode::Stack {
+            entries: vec![StackEntry { panel: Properties, open: true, height: None, group: Some(Box::new(tabs(&[Properties, Align, EffectsPresets], 1))) }],
+        };
+        d.close(Properties);
+        assert!(d.is_visible(Align));
+        d.close(Align);
+        assert!(d.is_visible(EffectsPresets));
+        d.close(EffectsPresets);
+        assert_eq!(d.panel_count(), 0);
+        assert!(matches!(d, DockNode::Stack { entries } if entries.is_empty()));
+    }
+
+    #[test]
+    fn removing_earlier_inactive_floating_tab_keeps_the_shown_panel() {
+        use PanelKind::*;
+        let mut layout =
+            Layout { root: tabs(&[Composition], 0), floating: vec![Floating { panels: vec![Properties, Align, EffectsPresets], active: 1, rect: [0.0; 4] }] };
+        assert!(layout.unfloat(Properties));
+        let f = &layout.floating[0];
+        assert_eq!(f.panels.get(f.active), Some(&Align));
+        assert!(layout.root.is_visible(Composition));
+    }
+
+    #[test]
+    fn floating_removal_keeps_active_neighbor_and_handles_invalid_index() {
+        use PanelKind::*;
+        for (active, closed, shown) in
+            [(0, Properties, Align), (1, Align, EffectsPresets), (2, EffectsPresets, Align), (usize::MAX, Properties, EffectsPresets)]
+        {
+            let mut layout =
+                Layout { root: tabs(&[Composition], 0), floating: vec![Floating { panels: vec![Properties, Align, EffectsPresets], active, rect: [0.0; 4] }] };
+            assert!(layout.unfloat(closed));
+            let f = &layout.floating[0];
+            assert_eq!(f.panels.get(f.active), Some(&shown));
+            for p in [Properties, Align, EffectsPresets] {
+                layout.unfloat(p);
+            }
+            assert!(layout.floating.is_empty());
+            assert!(!layout.unfloat(History));
+        }
+    }
+
+    #[test]
+    fn reopening_panel_without_usual_anchors_uses_first_group() {
+        use PanelKind::*;
+        let mut d = tabs(&[Composition], 0);
+        d.open_near(History, Project);
+        assert!(d.is_visible(History));
+        assert!(d.contains(Composition));
+        d.open_near(History, Project);
+        assert_eq!(d.panel_count(), 2);
+    }
+
+    #[test]
+    fn reopening_panel_uses_first_nested_or_stacked_group() {
+        use PanelKind::*;
+        let mut d = DockNode::Split { vertical: false, size: SplitSize::Ratio(0.5), a: Box::new(tabs(&[Composition], 0)), b: Box::new(tabs(&[Audio], 0)) };
+        d.open_near(History, Project);
+        assert!(matches!(&d, DockNode::Split { a, b, .. } if a.is_visible(History) && b.is_visible(Audio) && b.panel_count() == 1));
+        let mut d = DockNode::Stack { entries: vec![StackEntry { panel: Audio, open: false, height: None, group: None }] };
+        d.open_near(History, Project);
+        assert!(d.is_visible(History));
+        assert!(!d.is_visible(Audio));
+        assert_eq!(d.panel_count(), 2);
+    }
+
+    #[test]
+    fn reopening_panel_into_empty_layout_is_visible() {
+        use PanelKind::*;
+        for mut d in [tabs(&[], usize::MAX), DockNode::Stack { entries: vec![] }] {
+            d.open_near(History, Project);
+            assert!(d.is_visible(History));
+            assert_eq!(d.panel_count(), 1);
+        }
+    }
+
+    #[test]
+    fn reopening_panel_preserves_preferred_anchor_fallbacks() {
+        use PanelKind::*;
+        let mut d = tabs(&[Composition, Project, EffectsPresets], 0);
+        d.open_near(History, Composition);
+        assert_eq!(d, tabs(&[Composition, Project, EffectsPresets, History], 3));
+        let mut d = tabs(&[Composition, Project, EffectsPresets], 0);
+        d.open_near(History, Audio);
+        assert_eq!(d, tabs(&[Composition, Project, EffectsPresets, History], 3));
     }
 }

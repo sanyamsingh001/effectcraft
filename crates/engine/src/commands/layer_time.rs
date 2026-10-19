@@ -86,6 +86,12 @@ fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
     if !comp.layers.iter().filter(|l| ids.contains(&l.id)).any(remappable) {
         return Err(bad("layer.enableTimeRemap", "time remapping needs a footage or composition layer"));
     }
+    let source_spans: std::collections::HashMap<_, _> = comp
+        .layers
+        .iter()
+        .filter(|l| ids.contains(&l.id))
+        .filter_map(|l| s.project.item(l.source.item()?).and_then(|i| i.source_span()).map(|span| (l.id, span)))
+        .collect();
     let on = s.edit("Enable Time Remapping", None, |proj, _| {
         let mut next = proj.next_id;
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
@@ -97,13 +103,28 @@ fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
             if target && !has {
                 let mut pr = remap_prop(&mut Ids(&mut next));
                 let (lin, lout) = (l.layer_time(l.in_point), l.layer_time(l.out_point));
-                let (a, b) = (lin.min(lout), lin.max(lout));
-                pr.value = KV::Scalar(source_secs(l, l.in_point));
-                pr.keys = vec![Keyframe::new(a, KV::Scalar(a.seconds())), Keyframe::new(b, KV::Scalar(b.seconds()))];
-                if lin > lout {
-                    // Reversed layers keep showing what they showed.
-                    pr.keys[0].value = KV::Scalar(source_secs(l, l.out_point - fd));
-                    pr.keys[1].value = KV::Scalar(source_secs(l, l.in_point));
+                let last_visible = l.layer_time((l.out_point - fd).max(l.in_point));
+                let bounded = source_spans.get(&l.id).copied().filter(|(duration, _)| {
+                    // An out point itself is exclusive. A normally reversed clip ends one
+                    // source frame below zero there, while its last visible frame is zero.
+                    lin < Tick::ZERO || lin >= *duration || last_visible < Tick::ZERO || last_visible >= *duration
+                });
+                if let Some((_, last_frame)) = bounded {
+                    let (a, b) = (lin.min(lout).clamp(Tick::ZERO, last_frame), lin.max(lout).clamp(Tick::ZERO, last_frame));
+                    pr.value = KV::Scalar(lin.clamp(Tick::ZERO, last_frame).seconds());
+                    pr.keys.push(Keyframe::new(a, KV::Scalar(a.seconds())));
+                    if b > a {
+                        pr.keys.push(Keyframe::new(b, KV::Scalar(b.seconds())));
+                    }
+                } else {
+                    // Keep the established default keys on unextended and still layers.
+                    let (a, b) = (lin.min(lout), lin.max(lout));
+                    pr.value = KV::Scalar(source_secs(l, l.in_point));
+                    pr.keys = vec![Keyframe::new(a, KV::Scalar(a.seconds())), Keyframe::new(b, KV::Scalar(b.seconds()))];
+                    if lin > lout {
+                        pr.keys[0].value = KV::Scalar(source_secs(l, l.out_point - fd));
+                        pr.keys[1].value = KV::Scalar(source_secs(l, l.in_point));
+                    }
                 }
                 l.props.children.insert(0, Node::Prop(pr));
             } else if !target && has {

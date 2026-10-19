@@ -17,7 +17,7 @@
 use effectcraft_engine::effects::{ColoramaPalette, OffsetCurve};
 use effectcraft_engine::geom::Mat3;
 use effectcraft_engine::keyframe::Value;
-use effectcraft_engine::project::{Layer, PropGroup};
+use effectcraft_engine::project::{GroupKind, Layer, PropGroup, Property};
 use effectcraft_engine::render::EvalCtx;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
@@ -33,6 +33,147 @@ pub const LUMETRI: &str = "ec.color.lumetri";
 pub const COLORAMA: &str = "ec.color.colorama";
 pub const GLOW: &str = "ec.stylize.glow";
 pub const RESHAPE: &str = "ec.distort.reshape";
+
+pub const MESH_WARP: &str = "ec.distort.meshwarp";
+
+/// Also exposes the Distortion Mesh in projects saved when its UI metadata was Hidden.
+pub fn is_mesh_prop(layer: &Layer, prop: &Property) -> bool {
+    prop.match_id == "mesh"
+        && layer.effects().is_some_and(|fx| {
+            fx.groups().any(|g| matches!(&g.kind, GroupKind::Effect { effect } if effect == MESH_WARP) && g.get("mesh").is_some_and(|p| p.uid == prop.uid))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn mesh_row(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    p: &egui::Painter,
+    layer: &Layer,
+    g: &PropGroup,
+    prop: &Property,
+    r: Rect,
+    x: f32,
+    actions: &mut Actions,
+) {
+    let t = app.tokens;
+    let right = r.max.x - if prop.is_animated() { 56.0 } else { 8.0 };
+    let width = (right - x).clamp(0.0, 48.0);
+    let edit = Rect::from_min_size(pos2(x, r.center().y - 9.0), vec2(width, 18.0));
+    let resp = ui.interact(edit, egui::Id::new(("mesh-edit", prop.uid)), Sense::click());
+    p.text(edit.center(), Align2::CENTER_CENTER, "Edit…", Tokens::ui(11.5), t.hot_text);
+    app.auto.add(&format!("effectControls.effect.{}.mesh.edit", g.uid), edit, "Edit Distortion Mesh");
+    if resp.clicked() {
+        app.session.state.selected_props = vec![(layer.id, g.uid)];
+        app.ui.viewer.show_layer_controls = true;
+    }
+    resp.on_hover_text("Drag mesh vertices in the Composition panel; select a vertex to edit its tangents");
+    let reset = Rect::from_min_size(pos2(edit.max.x + 8.0, edit.min.y), vec2(44.0, 18.0));
+    if reset.max.x <= right && reset_link(app, ui, p, reset, &format!("effectControls.effect.{}.mesh.reset", g.uid)) {
+        actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": prop.uid, "value": ""})));
+    }
+}
+
+/// Mesh vertices and the selected vertex's four Bezier tangent handles share the existing
+/// Effect Controls handle style and prop.set undo/keyframe behavior.
+#[allow(clippy::too_many_arguments)]
+pub fn mesh_overlay(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    map: &super::viewer::ViewerMap,
+    ectx: &EvalCtx,
+    layer: &Layer,
+    g: &PropGroup,
+    m: &Mat3,
+    actions: &mut Actions,
+) {
+    use effectcraft_engine::effects::WarpMesh;
+    if layer.switches.locked {
+        return;
+    }
+    if g.get("mesh").is_none() {
+        return;
+    }
+    let rows = WarpMesh::dimension(ectx.f(layer, g, "rows", 7.0));
+    let columns = WarpMesh::dimension(ectx.f(layer, g, "columns", 7.0));
+    let mesh = WarpMesh::parse(&str_value(layer, ectx, g, "mesh"), rows, columns);
+    let (w, h) = effectcraft_engine::render::source_size(ectx.project, layer);
+    // Shape and text layers use centered layer coordinates, as do their effect defaults.
+    let centered = w == 0 || h == 0;
+    let size = if centered { [ectx.comp.width as f64, ectx.comp.height as f64] } else { [w as f64, h as f64] };
+    let origin = if centered { [-size[0] / 2.0, -size[1] / 2.0] } else { [0.0; 2] };
+    let to_screen = |q: [f64; 2]| map.to_screen(fw::layer_to_comp(m, [q[0] + origin[0], q[1] + origin[1]]));
+    let ctx = ui.ctx().clone();
+    let selection_id = egui::Id::new(("mesh-selected-vertex", g.uid));
+    let mut selected = ctx.data(|d| d.get_temp::<usize>(selection_id)).unwrap_or(0).min(mesh.controls.len().saturating_sub(1));
+    let grid = Stroke::new(1.0, Color32::from_white_alpha(170));
+    for row in 0..=rows {
+        let line: Vec<Pos2> = (0..=columns * 12).map(|i| to_screen(mesh.sample(i as f64 / (columns * 12) as f64, row as f64 / rows as f64, size))).collect();
+        painter.add(egui::Shape::line(line, grid));
+    }
+    for column in 0..=columns {
+        let line: Vec<Pos2> = (0..=rows * 12).map(|j| to_screen(mesh.sample(column as f64 / columns as f64, j as f64 / (rows * 12) as f64, size))).collect();
+        painter.add(egui::Shape::line(line, grid));
+    }
+    for index in 0..mesh.controls.len() {
+        let Some(q) = mesh.point(index, 0, size) else { continue };
+        let at = to_screen(q);
+        let hit = Rect::from_center_size(at, vec2(12.0, 12.0));
+        let id = egui::Id::new(("mesh-vertex", g.uid, index));
+        let resp = ui.interact(hit, id, Sense::click_and_drag());
+        let hot = resp.hovered() || resp.dragged() || selected == index;
+        let draw = Rect::from_center_size(at, vec2(6.0, 6.0));
+        painter.rect_filled(draw, 0.0, if hot { app.tokens.accent } else { Color32::WHITE });
+        painter.rect_stroke(draw, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
+        app.auto.add(&format!("viewer.mesh.{}.vertex.{index}", g.uid), hit, &format!("Mesh vertex {}", index + 1));
+        if resp.clicked() || resp.drag_started() {
+            selected = index;
+            ctx.data_mut(|d| d.insert_temp(selection_id, index));
+        }
+        if resp.hovered() || resp.dragged() {
+            ctx.set_cursor_icon(egui::CursorIcon::Move);
+        }
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+            && let Some(lp) = fw::comp_to_layer(m, map.to_comp(pos))
+        {
+            let mut updated = mesh.clone();
+            if let Some(control) = updated.controls.get_mut(index).and_then(|v| v.first_mut()) {
+                control[0] += lp[0] - origin[0] - q[0];
+                control[1] += lp[1] - origin[1] - q[1];
+                let key = gesture_key(ui, id, resp.drag_started());
+                set_str(actions, layer, g, "mesh", updated.format(), Some(key));
+            }
+        }
+    }
+    for part in 1..=4 {
+        let (Some(q), Some(vertex)) = (mesh.point(selected, part, size), mesh.point(selected, 0, size)) else { continue };
+        let at = to_screen(q);
+        painter.line_segment([to_screen(vertex), at], Stroke::new(1.0, app.tokens.accent));
+        let hit = Rect::from_center_size(at, vec2(10.0, 10.0));
+        let id = egui::Id::new(("mesh-tangent", g.uid, selected, part));
+        let resp = ui.interact(hit, id, Sense::drag());
+        painter.circle_filled(at, 3.0, if resp.hovered() || resp.dragged() { app.tokens.accent } else { Color32::WHITE });
+        painter.circle_stroke(at, 3.0, Stroke::new(1.0, Color32::BLACK));
+        app.auto.add(&format!("viewer.mesh.{}.vertex.{selected}.tangent.{part}", g.uid), hit, "Mesh tangent");
+        if resp.hovered() || resp.dragged() {
+            ctx.set_cursor_icon(egui::CursorIcon::Move);
+        }
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+            && let Some(lp) = fw::comp_to_layer(m, map.to_comp(pos))
+        {
+            let mut updated = mesh.clone();
+            if let Some(control) = updated.controls.get_mut(selected).and_then(|v| v.get_mut(part)) {
+                control[0] += lp[0] - origin[0] - q[0];
+                control[1] += lp[1] - origin[1] - q[1];
+                let key = gesture_key(ui, id, resp.drag_started());
+                set_str(actions, layer, g, "mesh", updated.format(), Some(key));
+            }
+        }
+    }
+}
 
 fn str_value(layer: &Layer, ectx: &EvalCtx, g: &PropGroup, id: &str) -> String {
     match g.get(id).map(|p| ectx.value(layer, p)) {

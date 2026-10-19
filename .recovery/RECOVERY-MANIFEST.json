@@ -1,0 +1,1910 @@
+{
+  "already_published_heads_last_verified_2026_10_19T1749Z": {
+    "1359": "b99dc45ff7ff52df5dd81367cf129482ae04635e",
+    "1380": "e619112861dd9b5461ae5bf361276c3f222b45f2",
+    "1776": "9bcf2e2dfd95d985dc34dfa071fa61065f4690c3",
+    "464": "71470935729299a026165ce1f03f6b7de5e801b5"
+  },
+  "canonical_base_head": "cae67546dd8db672706698a3ad897b758b0339f3",
+  "canonical_branch": "recovery/untested-20261019-1853/canonical",
+  "canonical_source_updates": [
+    {
+      "bytes": 163776,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "Cargo.lock",
+      "sha256": "c25a59d6e16cd470d970d53dd3fdd370e93ae6d38e85d2dad632ae2481e3eff4"
+    },
+    {
+      "bytes": 57454,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "apps/effectcraft-cli/src/main.rs",
+      "sha256": "d75a810c52f7c34e94cb5eb978af45d4ba8ed7be523d144cfef7a315d53c4eb8"
+    },
+    {
+      "bytes": 12703,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "apps/effectcraft-cli/tests/qa_template.rs",
+      "sha256": "09a9332cac0acb2de503f8823859a58e5ec72abf26c71ce1360ffce3434ae7b2"
+    },
+    {
+      "bytes": 12441,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "apps/effectcraft-web/src/app.rs",
+      "sha256": "faae1aa9e56802477042cc9a5f6fb0e55edc78af8a90a2bf11e14e7df2475286"
+    },
+    {
+      "bytes": 1372,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "contributors/people.toml",
+      "sha256": "4a87ee630e6057900e363d0b1df825a6519857a38889047062e149904b5c5792"
+    },
+    {
+      "bytes": 3892,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/automation/src/lib.rs",
+      "sha256": "2d2650835e5b3b056ae5768cfafaf1f17355e5b5b94eb575e932b5050b19f455"
+    },
+    {
+      "bytes": 43521,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/automation/src/tests.rs",
+      "sha256": "453bede6d71d5c80a56997a3e42748c96fb73a98dddd82eb3d7f7055d22fd5ab"
+    },
+    {
+      "bytes": 44866,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/automation/src/tools.rs",
+      "sha256": "16df9c5dee09c1e44e9c3a6f71335829226b8bb5793b509630714269f15e8ac0"
+    },
+    {
+      "bytes": 751,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/effects/Cargo.toml",
+      "sha256": "3825db7be6a5742f1860d290402d134d15fd4faa4d41f6ad0985f1b4f391e5b8"
+    },
+    {
+      "bytes": 18334,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/effects/src/card3d.rs",
+      "sha256": "5c25c33b9d886d61a3182e0e59a9f521811916c76f6a403c5cc7d5bedade0909"
+    },
+    {
+      "bytes": 67119,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/effects/src/distort2.rs",
+      "sha256": "5abff79d538f881fed965f3d9020fa75b11c9fa167bf3b99fa348e39822ebdef"
+    },
+    {
+      "bytes": 53458,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/effects/src/lib.rs",
+      "sha256": "2079ab17842845ec67b27a72449633dbe91189fba3c82975b5e719950d82880a"
+    },
+    {
+      "bytes": 22078,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/effects/src/puppet/arap.rs",
+      "sha256": "e5ddc356ff9ea959eb50a1ab265cf4e9a23c99dee29fa64e12bc6cc4ad247bab"
+    },
+    {
+      "bytes": 24894,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/effects/src/puppet/mod.rs",
+      "sha256": "a792ac1da3b272b9788deb91feeea13615af2da715d1bda97917f306f34a55d9"
+    },
+    {
+      "bytes": 24695,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/effects/src/puppet/tests.rs",
+      "sha256": "d67a2c6079f991d0e19262df7a7038309e334dbc1395c8a3e2d8f47a7a4fae9e"
+    },
+    {
+      "bytes": 80432,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/effects/src/sim.rs",
+      "sha256": "bf61a3f8be6d0d7d7c0c2aaee91ffc75af0587dc7030eafb2a1aa4d9d0c4346a"
+    },
+    {
+      "bytes": 23927,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/anim.rs",
+      "sha256": "b964c18c1b78da2f7a9bf4ff7b29603ab120756b0a6edc640ea18d1e8b5fe97d"
+    },
+    {
+      "bytes": 14808,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/batch.rs",
+      "sha256": "b768b7c491167022c9b683357c859542e26d335bba06595d7c9cc49aed9d0579"
+    },
+    {
+      "bytes": 34457,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/edit.rs",
+      "sha256": "34e042bbcfe01e367030c381def39e0a6b43d813e31b9e11f7b37413595575eb"
+    },
+    {
+      "bytes": 53301,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/essential.rs",
+      "sha256": "54bc3a0fb20f151c9eb2253f788491cfc76e34798c5d6056e6b7eb2abcff26c4"
+    },
+    {
+      "bytes": 45339,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/file_more.rs",
+      "sha256": "72c7477f1769723234bdfe3760a9740046410f1500bc9743036c6d9f06b88064"
+    },
+    {
+      "bytes": 10909,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/footage_panel.rs",
+      "sha256": "e507bcbe9850f8c11ab4070893446f3b62b8406174d8e1de6eb0923421c7587c"
+    },
+    {
+      "bytes": 10692,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/key_transform.rs",
+      "sha256": "ec666dddc8d55798601b952b00e06b5302d26ff00b8b55b16db56b91bcf2b924"
+    },
+    {
+      "bytes": 85947,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/layer.rs",
+      "sha256": "49cc81f8390ffeefee5af9796e4b49053157c122a3eef72ccadc8bcfecd51150"
+    },
+    {
+      "bytes": 9990,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/layer_time.rs",
+      "sha256": "a2867c109c73bebfe329bee5083aca8504727be3aa0b1705493c01f04c3b6d95"
+    },
+    {
+      "bytes": 9995,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/link.rs",
+      "sha256": "a2ef41fb663335df3a6ef1a3d9b543732f5bb2f44333fd163af4b9f06580389d"
+    },
+    {
+      "bytes": 28908,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/mask.rs",
+      "sha256": "aca8cde45395eef24d885745c85125b4a7151c05617c849642b254e7f65dc379"
+    },
+    {
+      "bytes": 20405,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/mod.rs",
+      "sha256": "88e37030c1f744cc9881a8c214a886ec1701121e765fbc84cec84bb1d6cd47ba"
+    },
+    {
+      "bytes": 53790,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/prop.rs",
+      "sha256": "412c427ed3c9edb3ac69cdc9d1409af669cfb97bbe621721f771b0c4e8b48574"
+    },
+    {
+      "bytes": 12261,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/prop_groups.rs",
+      "sha256": "f7bd0d78cba56ce3bdb48911a8b636379fd847cad6d8f252c6ddb0e6d3fe3c55"
+    },
+    {
+      "bytes": 34578,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/puppet.rs",
+      "sha256": "50a61fb145ffecc0724b981c3d8a2ae26f65fd2c436defb05f3033b90472cd5d"
+    },
+    {
+      "bytes": 48767,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/render_queue.rs",
+      "sha256": "9d4f97b0cb35008b25711b3de6ce25b0b2910f5e7e18f9c1dba4a427b952ad70"
+    },
+    {
+      "bytes": 23807,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/commands/viewer_cmds.rs",
+      "sha256": "09cc7975421bf6e394ef5367141e5272dfce582cd8e36246a4e5f7b2d9aea599"
+    },
+    {
+      "bytes": 11167,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/footage_check.rs",
+      "sha256": "d3340e14ddc2a3b053b1891714884adb07c76856ea7051f8e51c13432e9426fb"
+    },
+    {
+      "bytes": 14445,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/history.rs",
+      "sha256": "0d790f2cfc528d0a5a1865c9cd534abacbb3eb4e3318bab3b23c4c3885636eaf"
+    },
+    {
+      "bytes": 49154,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/lib.rs",
+      "sha256": "20aa09119af0fb720e9aba31d7e4232bf9342df08351f4588bd4fc6a3f22d647"
+    },
+    {
+      "bytes": 53824,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/prefs.rs",
+      "sha256": "86a1a7ac6420289b58c7fe1f5d34721425f58cbce64df5ddfb1f7c2cac80fdbf"
+    },
+    {
+      "bytes": 13820,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/session_settings.rs",
+      "sha256": "f8a430525a3668f4b0213b24d37fac76399ade7669506a74374ea3856dc78846"
+    },
+    {
+      "bytes": 10209,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_history.rs",
+      "sha256": "a3f5686914d72e9ff2b5e1a6d9998ba65f1177b2d985815bc206cb5cf6b0838b"
+    },
+    {
+      "bytes": 33150,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_settings.rs",
+      "sha256": "74b70de4a3fd2ed8ddbdadda0d0acc9ce8839f02b377f3eb59b480dfcafac450"
+    },
+    {
+      "bytes": 48973,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_timeline.rs",
+      "sha256": "e95c1fcf937bad45e90f4b7693688ff5784986f40b5871a90563d42d3e74096f"
+    },
+    {
+      "bytes": 34875,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_viewer.rs",
+      "sha256": "7c37ee3e66427d673bafd2f5d83cdd3b1cf9fa75e44f61cdaccff0cb787ff4ea"
+    },
+    {
+      "bytes": 40224,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/engine/src/viewer.rs",
+      "sha256": "b950e74599fd861be087e93b398456cf81e04eea98b8188ecbe887bf17548e59"
+    },
+    {
+      "bytes": 17968,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/export/src/encode.rs",
+      "sha256": "50fcb0626d9c155f329c54a33b470aa133b69c93c64f789650c2b76cd5f2d80b"
+    },
+    {
+      "bytes": 21490,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/export/src/webm.rs",
+      "sha256": "cf06b741a6f4a33c50ade99dcc26aeff554db3d75e52c58f9428c3739a871f2d"
+    },
+    {
+      "bytes": 25026,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/export/tests/roundtrip.rs",
+      "sha256": "d2d03b1c42c57ed545065f508d72e2ea0c4ed9330cac21bf83f3ad45da3ccbbc"
+    },
+    {
+      "bytes": 22366,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/expr/src/host.rs",
+      "sha256": "3aeab741cf7d96322cf7e560b5eda3ee72a005a7627c3ee68e2718b9bbdf84bf"
+    },
+    {
+      "bytes": 9040,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/expr/src/lib.rs",
+      "sha256": "06767df26c9f3fb986daec6f6dc1450a49c335cb4d2209893ac90eaed1f2bbc1"
+    },
+    {
+      "bytes": 18452,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/gpu/src/fx_distort.rs",
+      "sha256": "36f1aec8bb8265c178f05b598d06ffeb8d3b7799bf8a6ebabbbf209e609d7c79"
+    },
+    {
+      "bytes": 16333,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/gpu/src/lib.rs",
+      "sha256": "f64d530b5c310e0e2675d4d3d24007fc4e5cd4ae2610277827f7961552c79a2d"
+    },
+    {
+      "bytes": 8362,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/gpu/src/tests_fx_particles.rs",
+      "sha256": "c15d73d348536508913d2087687a558371d59b8979a658707b8ff144a31ae730"
+    },
+    {
+      "bytes": 1181,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/host/Cargo.toml",
+      "sha256": "c95586fa0ab214d7e0e3fb7cb78ac99327061e5dc2482e124170e157a3862f2f"
+    },
+    {
+      "bytes": 3518,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/media/src/lib.rs",
+      "sha256": "47dfd836fa0e1dae631458f5494400e54a30347b2cb3b91a693c27cea5615add"
+    },
+    {
+      "bytes": 33553,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/media/src/pool.rs",
+      "sha256": "22ec7dc62cdc11b646ea7390af8320ad51658f8190f2f0e2c878ab640db322c8"
+    },
+    {
+      "bytes": 9293,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/media/src/probe.rs",
+      "sha256": "7ff102f4b70fded0f79c9aca19b4460d16b0cbcd3fa7030dab490e6c18ad25b7"
+    },
+    {
+      "bytes": 48672,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/model/src/gltf.rs",
+      "sha256": "6a10c7819dbf40eaadbf457a8d089255db931441b0aace627ba56647d6d14440"
+    },
+    {
+      "bytes": 27863,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/model/src/lib.rs",
+      "sha256": "4591ab370ed5f5803c9f387a586321ec1a89196747930db8aad8167ce26f7d0d"
+    },
+    {
+      "bytes": 19516,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/model/src/tests.rs",
+      "sha256": "27dcf60777f95bff68b631eef480ce94d40dc7212a863cf30ae3b1d037d150aa"
+    },
+    {
+      "bytes": 48847,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/project/src/build.rs",
+      "sha256": "b686140d9ad83954fae1e32dd984fb395f20f7f3aa19ffc5995c31fd2e1bb3d3"
+    },
+    {
+      "bytes": 35096,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/project/src/essential.rs",
+      "sha256": "8e11c4828f60e950810b23a81e7bc2c603c4aa14f98e8eab21296937202aaf99"
+    },
+    {
+      "bytes": 51987,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/project/src/lib.rs",
+      "sha256": "f31cedc7f8325baec68d2e6634a5544e3d35c88f520b353c8e32868cff4287f4"
+    },
+    {
+      "bytes": 8664,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/project/src/tests.rs",
+      "sha256": "45bd99df63c77c78048d88875a4ab5aa783af3d6141eeb8ca283997ccdfd068d"
+    },
+    {
+      "bytes": 14585,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/audio.rs",
+      "sha256": "f347585ac6dcd898d25398b436709b708d8a5471ba3b01cd6e2006ae74734f69"
+    },
+    {
+      "bytes": 24961,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/cache.rs",
+      "sha256": "8b15f2f5fc37ae851330f109f3809116fc228862ecf829f8599292199041fa1a"
+    },
+    {
+      "bytes": 15812,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/eval.rs",
+      "sha256": "b128f668539d7f20ba456197ddb1673072abc17193a16cadd8571829f8a40227"
+    },
+    {
+      "bytes": 99888,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/lib.rs",
+      "sha256": "6f3096e357b6d3ac26800d5b5dcb4b9dbde59f810637c87d981c3112c187d4e3"
+    },
+    {
+      "bytes": 10793,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/masks.rs",
+      "sha256": "6b113ee867eb4973bd9a594e7cc1864eee4e0df1394da90c273bea27999eafc1"
+    },
+    {
+      "bytes": 31380,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/shapes.rs",
+      "sha256": "2e279c32611c94c3ffc236aba95864a5a77782ca63acefbee2bd2dad19e059d8"
+    },
+    {
+      "bytes": 24534,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/tests.rs",
+      "sha256": "60e547be11159622482535b3df98f7fe5fde8e4313a82ff36015604fc76c6d8f"
+    },
+    {
+      "bytes": 6427,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/tests_mask_blur.rs",
+      "sha256": "fe1ee613760ad304b4c26e7848b0ed3e529c3b98ddc950f7e35bc7a3693fb79a"
+    },
+    {
+      "bytes": 39392,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/three_d/adv/scene.rs",
+      "sha256": "2999a9e7b05b9681eeee2344da10b4df5ea63a405a133f59fc9c415df77ce230"
+    },
+    {
+      "bytes": 16179,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/three_d/adv/shade.rs",
+      "sha256": "730e3d5e3ccb7f1e19d71ab6718d696596e269925a91b1e0b5cf7cb6bc567286"
+    },
+    {
+      "bytes": 30561,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/render/src/three_d/adv/tests.rs",
+      "sha256": "c5cd74c8972c34c2a2a7f6db576feaaefcdecdf198bd2c6fb7da0e93a8e0311a"
+    },
+    {
+      "bytes": 31541,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/script/src/model.rs",
+      "sha256": "3ebc4895ef056acbb29955fa00601fc5802d7f4fc3eefc1d63e29b9d343c2a94"
+    },
+    {
+      "bytes": 28030,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/script/src/tests.rs",
+      "sha256": "1f9ea8fa2a505775c91df8de44e10fde2be33292a5624a661623284cfeefbab6"
+    },
+    {
+      "bytes": 32217,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/time/src/lib.rs",
+      "sha256": "ffdbac937e94e82842dafdda826eadff668bb6b5d79074aeec42c5a658e79096"
+    },
+    {
+      "bytes": 1397,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/Cargo.toml",
+      "sha256": "d5164571419e0108f6956d76e9d2fe3ee970cc40abc2e6004d8bc2c34c3e32e6"
+    },
+    {
+      "bytes": 74279,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/dock.rs",
+      "sha256": "5d5f60b50b6ac6617fa4d9b24258f54e1b315c0f540c73f71981ee6d0fada82b"
+    },
+    {
+      "bytes": 63409,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/frames.rs",
+      "sha256": "30b9e8fc88f352c15d2ddc0b15f19aa226d3ce35cb56a889089350db54a6c116"
+    },
+    {
+      "bytes": 78483,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/lib.rs",
+      "sha256": "f63cd4452eff0b4472cfa95fb9a7b105d6dc0c38c8d74c5640922b8dd8b6a35b"
+    },
+    {
+      "bytes": 94299,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/menus.rs",
+      "sha256": "4cd5747f8aaf664550e449e1a6982f9408dae5b0df57de16bdf997677ad7d0fc"
+    },
+    {
+      "bytes": 33381,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/dialogs.rs",
+      "sha256": "f1a36a4112c7576ad62576b8be40baf00e144cdec8b4bf5e3ad0c739a6d5dfcd"
+    },
+    {
+      "bytes": 16042,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/ease_presets.rs",
+      "sha256": "fbac6ef15299b7f50c043f08b4b551f608ee14de62ccb834357f9317009c3017"
+    },
+    {
+      "bytes": 67778,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/effect_controls.rs",
+      "sha256": "713c62650c487e11dc54d6b76bdc4f441d298b7911df904ce960a403a668c150"
+    },
+    {
+      "bytes": 31228,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/essential.rs",
+      "sha256": "19be48e4b357a446aa8855cc515952597d1c5f24f8520dfa8e1b567bb821184a"
+    },
+    {
+      "bytes": 10094,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/footage_panel.rs",
+      "sha256": "ee1a1222b69d9eba44196e7353a7896ef3ba4abc837eb95e33abbab7707c49c8"
+    },
+    {
+      "bytes": 45842,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/forms.rs",
+      "sha256": "a61d4de1fa1bd068de3a6cb187d62306a678d204b30f21874367c8032f66708c"
+    },
+    {
+      "bytes": 46837,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/fx_editors.rs",
+      "sha256": "d4637485dabdde2e3c7843af92fa58dc059b89e88dcb72cc7048611d8c21abdf"
+    },
+    {
+      "bytes": 29599,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/graph.rs",
+      "sha256": "154fde0e938cdd5410d98901b1e4df4955746b363ff1d14ca1e62ce07eaa9714"
+    },
+    {
+      "bytes": 13638,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/graph_tools.rs",
+      "sha256": "6be0d87cba3ef7a8ccf02e6eeaf4ec2f886058ce13de9a00cbe9a75e9e5b6629"
+    },
+    {
+      "bytes": 12518,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/key_dialogs.rs",
+      "sha256": "0e15d5c1a55263b818993015a63ad65d318673a0d320f6d1b6101bcc1bfbf784"
+    },
+    {
+      "bytes": 24082,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/markers_ui.rs",
+      "sha256": "354cad091a30fdb5891d655398375594c84603f7ae96f8dd44e3b5e6683ecf00"
+    },
+    {
+      "bytes": 8058,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/mod.rs",
+      "sha256": "71c6af4459525df34b76f70475c8fb821bfb74b076036afaca910dae01b6d6c3"
+    },
+    {
+      "bytes": 41787,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/project.rs",
+      "sha256": "1e360ed9869c98479b025e29e039dd4172fad666e086f0f81bb2082344d5e04a"
+    },
+    {
+      "bytes": 26032,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/properties.rs",
+      "sha256": "d581be806b9824705dedacb121ad0ba1fc4bd9288580b7e6c83e11415e04b23c"
+    },
+    {
+      "bytes": 8627,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/puppet_tool.rs",
+      "sha256": "5a9a6b63922e332c92fa6ed43c978f2c27c66d38d33782a755feda670a9ab899"
+    },
+    {
+      "bytes": 43144,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/render_queue.rs",
+      "sha256": "9f89f8778f42b9a624b382ebaf99a39c464c4599f94c544914c45d6ffab91bf3"
+    },
+    {
+      "bytes": 30531,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/settings.rs",
+      "sha256": "b588df37536bc7724010d7467c77851961d90c09ffa2dd889309ffbb0d3674de"
+    },
+    {
+      "bytes": 201890,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/timeline.rs",
+      "sha256": "4929353af019d35c22eaa9d1f7e877fcd782e850db34c3da16847d12e345413b"
+    },
+    {
+      "bytes": 109859,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/viewer.rs",
+      "sha256": "8b84d43b97c86679f19696286faee017949d48663598f5ac9eca47440fe5f1e3"
+    },
+    {
+      "bytes": 3510,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/viewer_drop.rs",
+      "sha256": "c1b0cce2de17b24a48d4eaa72ad7ec65f76ffe959900cc16a5b52e8a5fd1d5b5"
+    },
+    {
+      "bytes": 26601,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/viewer_overlays.rs",
+      "sha256": "5d6be73be19dc9ec24eb3c1b7998f8f9bc1e1bca7b0fdf2030e5bea5b41998f1"
+    },
+    {
+      "bytes": 35929,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/viewer_tools.rs",
+      "sha256": "d68d92f451239bac9beeb996704b953abf443c7c2fd1290a5f65c1cd3662e2ab"
+    },
+    {
+      "bytes": 11868,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/viewers.rs",
+      "sha256": "de4dbbc875cb50f590bbba5b142bf04b5af205ffc968041e26f753b0a091e56a"
+    },
+    {
+      "bytes": 8014,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/prefs_live.rs",
+      "sha256": "46003845748d15e5a895373b8c650d4cd579539abc5115c1e4cfcd451049b726"
+    },
+    {
+      "bytes": 26034,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/widgets.rs",
+      "sha256": "00978a9e96e1cd416f2200079b441cadd61d9eae00e496e4c625fb7de082525d"
+    },
+    {
+      "bytes": 17102,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_fx_editors.rs",
+      "sha256": "a8647eee22a2982fc5db2e2f99c928264b55a49ba3eefcd0f5e69ec3a733900a"
+    },
+    {
+      "bytes": 44137,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_keyframes.rs",
+      "sha256": "f557e04b829d54be81f48a07fd4680a674de2a793f628d92bb5fb96d2360456c"
+    },
+    {
+      "bytes": 20915,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_tabs.rs",
+      "sha256": "ec4dc2d9d20f92cac6bb1412bc75fe4870e1007f05cf3da1048fbc27ed8319f0"
+    },
+    {
+      "bytes": 79503,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_viewer.rs",
+      "sha256": "30fa4f57ebca2aa6b86a063663bbf594239f7b472c7a23cf1c24d8b7579648eb"
+    },
+    {
+      "bytes": 13790,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_web_offload.rs",
+      "sha256": "e933dc69cc52906a297990a9c6651cc35ce7b8a88c8dbbb8aa8940090b1b73b6"
+    },
+    {
+      "bytes": 43755,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "docs/agents.md",
+      "sha256": "48af91d0a4c9c91d8cc0fd2b7ed2c6f89af7956c6b5c498a0737456c6e39f506"
+    },
+    {
+      "bytes": 11152,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "docs/control-protocol.md",
+      "sha256": "f055357a8b1f403cf4835bf9d04917888ac63f717e2f25d86bf8b188d150676a"
+    },
+    {
+      "bytes": 21172,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "docs/gaps.md",
+      "sha256": "8349b00f4bb51386a757796ef56786f5833b190f7c7ab4e03d431d1784da16f8"
+    },
+    {
+      "bytes": 15928,
+      "kind": "tracked_modified",
+      "mode": "100644",
+      "path": "docs/preferences.md",
+      "sha256": "068a20a73508afd42e1f53641fe12955756b4c02db7bfee46528427669f4964e"
+    },
+    {
+      "bytes": 4147,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "apps/effectcraft-cli/src/template.rs",
+      "sha256": "837534f8a42ff498ac64adaa385aaa571906881c0a5b7267f19055a07dbbdede"
+    },
+    {
+      "bytes": 5347,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/automation/src/tests_atomic_tools.rs",
+      "sha256": "bdd88979beda62aec36db3daa3ede1337c847715c4a89c4203d1dfc77ec3bcd0"
+    },
+    {
+      "bytes": 8529,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/automation/tests/separated_position.rs",
+      "sha256": "35851da9255a772a751cc27a891ad047c318c1c9f674a7155b17d2f42a4b8562"
+    },
+    {
+      "bytes": 6174,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_atomic_properties.rs",
+      "sha256": "685d607c0553f5970f808b7fd98ed6bceae4b7bf211d455e251fca3ed27da848"
+    },
+    {
+      "bytes": 4794,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_batch_save_atomic.rs",
+      "sha256": "37454a5e45573ce40c4daa398fbe757353b06a873e30f9b705263e626404c32e"
+    },
+    {
+      "bytes": 4426,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_conform_frames.rs",
+      "sha256": "6722bed536a79a7ed4d12e17f001ddac8760848609e6b46a1136208a9165e2e2"
+    },
+    {
+      "bytes": 8479,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_essential_scale.rs",
+      "sha256": "ab2c54d17fb921e6ccae5414c2e48c3f30a26a658f96e505bceefcc6680cd385"
+    },
+    {
+      "bytes": 5946,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_key_edit_order.rs",
+      "sha256": "4e405d8f143233a0976cd9ae4fb4e6f0d9cc6ad6347039f50b38b83e6bc94e31"
+    },
+    {
+      "bytes": 2463,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_key_selection.rs",
+      "sha256": "a5b4a901b4640c0a75c246e0fea3fae504ed986f87dda0f846f9f579f2b43449"
+    },
+    {
+      "bytes": 8696,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_key_time.rs",
+      "sha256": "d9fdc8000a827ae94ad9dabc20fdb9fe4b324c9e8e2ef38ca2ffbb218f60aa17"
+    },
+    {
+      "bytes": 9932,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_layer_skew.rs",
+      "sha256": "5e8c495558c1323e620ae008791f9a7b4c9d4a3486ec4a039de7e1d6d94a161f"
+    },
+    {
+      "bytes": 7702,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_paste_layer_selection.rs",
+      "sha256": "f9793ee00535a7b08eb81868da6e676861cc20ecd1848f89f6cd10b75d1bb2c5"
+    },
+    {
+      "bytes": 5011,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_project_identifiers.rs",
+      "sha256": "0b0a18e0d615e94f50abec60982d6ecafa1d4487c3f04d8fe2bc7c8600ded82e"
+    },
+    {
+      "bytes": 4569,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_selection_sanitize.rs",
+      "sha256": "cb380a45e740213551a0801a88f2071e6197f3ffa97afb4faf65851f2d740f65"
+    },
+    {
+      "bytes": 5715,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/src/tests_spatial_tangent_selection.rs",
+      "sha256": "aa420f323d262bf53ed07984cb4ccef3048c7aada8c0864fc80ad12432469d06"
+    },
+    {
+      "bytes": 838,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/audio_output_formats.rs",
+      "sha256": "b38e8e3d4f82cd6ae7bf24a4b7e46acc3ab6bbbaa614f05d366f5f3efc08b395"
+    },
+    {
+      "bytes": 7107,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/batch_frontend.rs",
+      "sha256": "97124e4e4a8d3b023fc9f8a8daccf141d985f4acff49c3ec44e5e55da4d55543"
+    },
+    {
+      "bytes": 11169,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/batch_preferences.rs",
+      "sha256": "73cf89fd15aad23ccdcf5fe55cdd1565345608e5decd9e510ed79a0e6b00f58d"
+    },
+    {
+      "bytes": 6028,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/batch_rollback.rs",
+      "sha256": "c9f1cdf15982b14a545b377b5ef0644713c11af6b7b40edd5670b2693ab5fad0"
+    },
+    {
+      "bytes": 5072,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/conform_grid.rs",
+      "sha256": "6270165e3998a04749c318479c279f50eb60ddd81a8d67bed7a3c7e1b458d0a9"
+    },
+    {
+      "bytes": 6570,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/essential_linked_scale.rs",
+      "sha256": "1c0843bd91a06ac5a63644c610e8521ff6f7ca2aca56f8a6c1c3b570619ebe88"
+    },
+    {
+      "bytes": 4578,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/footage_boundaries.rs",
+      "sha256": "e15ceb9d164e80fd55db42a2e143e1e964050e56070f8dc27e948c25547d198d"
+    },
+    {
+      "bytes": 21228,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/footage_check_race.rs",
+      "sha256": "1710bb6e2b55090a3d650dad1b09a0fb3c66119dea63d30205b0168016e3cb2f"
+    },
+    {
+      "bytes": 7276,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/key_move_order.rs",
+      "sha256": "48394d2667962a4a0512c030bbd7f87805ffdb0fb97e41f65987ab51a73958e4"
+    },
+    {
+      "bytes": 5239,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/looped_interpretation.rs",
+      "sha256": "5a94af0d5cd27594dc4f99bd847b494fa144cb6784ad0686089f3dcf37fec090"
+    },
+    {
+      "bytes": 3229,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/looped_video_insertion.rs",
+      "sha256": "d34c136bf2e4da8e33f92b9d4b75c07720eb04765711f517fa0413b3960a0f62"
+    },
+    {
+      "bytes": 14568,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/parenting_2d_skew.rs",
+      "sha256": "b40c30353a3cee2f02fbb2f13e0b34cb53d3a4ef3692aa8f42377c53797a7fc3"
+    },
+    {
+      "bytes": 21378,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/parenting_3d_position.rs",
+      "sha256": "8f3b2086d45eb6fd0e8e11dcaf7497abb8208767502b5e4f45a7c369dc6dc3eb"
+    },
+    {
+      "bytes": 18652,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/property_key_api.rs",
+      "sha256": "9863057b103798d58afd37d68638b72af5b94d28416842c4d002e59ab5a583e1"
+    },
+    {
+      "bytes": 9151,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/puppet_pose.rs",
+      "sha256": "17adb284d20b6b14fad000f9150abd8141ac853f919de6e35c90eaf0bd608d5f"
+    },
+    {
+      "bytes": 6008,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/remembered_interpretation.rs",
+      "sha256": "89f52e3526426c50d7ac9cc84ec8c97aeec3edaaa833b187f1461bd0298aa24e"
+    },
+    {
+      "bytes": 2374,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/sequence_insertion.rs",
+      "sha256": "8c98b07edc9437fbe264bddcd4fe1a743d8ea0890c8514bd40d70c1d78db0fad"
+    },
+    {
+      "bytes": 1972,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/sequence_source_timing.rs",
+      "sha256": "8cb236a4ec2f2bb502e3bc99a35bbed09cb66d828b18a68dcb587933bd11b95c"
+    },
+    {
+      "bytes": 2658,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/slip_duration.rs",
+      "sha256": "268d9c894d3dc7afc7c958ce58a446a409902df524a60c08557e7662558382f6"
+    },
+    {
+      "bytes": 7853,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/time_remap_source.rs",
+      "sha256": "048707f3978d61cf10785b4ed53e0929d2499948538c6e27d1b890d134e57a24"
+    },
+    {
+      "bytes": 6919,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/engine/tests/video_reprobe.rs",
+      "sha256": "11e296ac65126a4ece0d108ff3f3313730671fc7820f139e962897d1a01ce542"
+    },
+    {
+      "bytes": 5648,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/export/tests/audio_sample_positions.rs",
+      "sha256": "abd3dc94f546f403f60c10581b192e5ef352bad2af8435e4de6ceffdd10798f7"
+    },
+    {
+      "bytes": 3122,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/export/tests/audio_size_limits.rs",
+      "sha256": "e3e504e4839bc1814d46c27f7b1e76e5c0b92c43c88410303f6112a274bbe016"
+    },
+    {
+      "bytes": 10713,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/export/tests/mov_audio_sample_positions.rs",
+      "sha256": "e7dee842464d11e8083213377bc3a286a3b8e3e85bea8d151b98554a7b1acefb"
+    },
+    {
+      "bytes": 8068,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/export/tests/native_audio_sample_positions.rs",
+      "sha256": "db271dbe207284a70ae10721a862ae3e81b389bcc88ae22fbd5df8a768ddd891"
+    },
+    {
+      "bytes": 6131,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/export/tests/prores_transfer.rs",
+      "sha256": "4198fed91074844c67b7cd540d7bba92a233995bc74bb1cd3771ad719f22aeb1"
+    },
+    {
+      "bytes": 2154,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/gpu/src/tests_layer_skew.rs",
+      "sha256": "749af5408f92ffb1478973ed2a55743903b2bbb77f9b3a08b3a9261ab8d5856f"
+    },
+    {
+      "bytes": 12289,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/gpu/tests/mesh_warp.rs",
+      "sha256": "1f4d05d2a672b6853dd61b6e3c65a7d375c3a5ea9482ebef21a12e5d450c4a79"
+    },
+    {
+      "bytes": 4427,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/host/tests/audio_export.rs",
+      "sha256": "c4912a6bde93229ac2273dafdff5b1d590189b24769cdc1c2c79a857a614c80e"
+    },
+    {
+      "bytes": 9693,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/host/tests/exr_import.rs",
+      "sha256": "d2e2c86d38c80e5ea3596a79b119625a42209268ec3984e97ab0f761e2acc945"
+    },
+    {
+      "bytes": 3831,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/media/src/exr_color.rs",
+      "sha256": "d48f558a1373b9c3b59e7ddd2881853d94be953f6c3d486871bd942745ac64e2"
+    },
+    {
+      "bytes": 8675,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/media/tests/audio_loops.rs",
+      "sha256": "83e224701668ae86e21109a56dbd74644b5fbbb7883da4b4e1656dc1adad26a7"
+    },
+    {
+      "bytes": 5914,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/project/src/tests_layer_skew.rs",
+      "sha256": "779de7bc13a8397f410d7714dbd5a7a715939206309d0322f4171d2e3e8c8249"
+    },
+    {
+      "bytes": 7611,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/render/tests/particle_world_camera.rs",
+      "sha256": "ec8a026e3ff747683e4dd1402d386c19642ee05e85c840a5ce6412153cc04e3e"
+    },
+    {
+      "bytes": 8219,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/script/tests/separated_position_reads.rs",
+      "sha256": "e6b698ed217e08a77a15998ba091ccd56f443bdca91c0f2bd544e0189f2e1c33"
+    },
+    {
+      "bytes": 12088,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/panels/viewer_geometry.rs",
+      "sha256": "c20f8339278635358f8477b1d26689b42249d2b24f4b381fd3c4f75876929ee9"
+    },
+    {
+      "bytes": 1578,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/src/workspaces.rs",
+      "sha256": "3de9e001443b60ce291764dc65dfbe043d06cbf423b94e9fa45ff70418a3771d"
+    },
+    {
+      "bytes": 5928,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_color_settings.rs",
+      "sha256": "0165fed97d6fbb55e153d6dc635ba68a6623c23de6c968078cbb1467e0a1a3eb"
+    },
+    {
+      "bytes": 7763,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_ease_slider.rs",
+      "sha256": "c9e71890d6ea7ae072d9710f5db6f39652933592509bae932d47408a7f7bed09"
+    },
+    {
+      "bytes": 7585,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_essential_scale.rs",
+      "sha256": "058d47c20e545c31bf1cca6918b998d97a63d13b02afd1295d1fb10ee123bc9c"
+    },
+    {
+      "bytes": 4039,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_export_paths.rs",
+      "sha256": "dabfa4c47a5229097cfb397443992f4fa09dabec1897344c6c53c9184aa1929c"
+    },
+    {
+      "bytes": 3798,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_extractor.rs",
+      "sha256": "94dd1ebd103305d4d9dc38ea0d679f263936bba20bedb8d2b31ae14b8408de9b"
+    },
+    {
+      "bytes": 1420,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_footage_loops.rs",
+      "sha256": "275f66a068b7eb65cb4c5d8ed2644c70c40f13a72c1c30d474e3dc10561b13c5"
+    },
+    {
+      "bytes": 4793,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_footage_playback.rs",
+      "sha256": "094f77828ed579d66298d3d89d9cf94b0e082e850f30b756187c2c0d86cff120"
+    },
+    {
+      "bytes": 27816,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_gesture_completion.rs",
+      "sha256": "d59bb674188d54c5c854fbdfc735e883427a11413398ecc9701ec11fa6a572d5"
+    },
+    {
+      "bytes": 11073,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_label_menus.rs",
+      "sha256": "4e95f8fab8dca78a5bc20e8314d0dd99eb3d1de2fab6889ded199a25e409048e"
+    },
+    {
+      "bytes": 34678,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_layer_locks.rs",
+      "sha256": "70488a1e421e9694ae17ae1af06dd8ffe5afc7916cbb780effc0f1abe8db91b4"
+    },
+    {
+      "bytes": 7617,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_layer_skew.rs",
+      "sha256": "57247f333a0cf961fec1b1392b4057c3ee6d0f22fc4610c6aa6186d1639792fc"
+    },
+    {
+      "bytes": 2880,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_marker_bin.rs",
+      "sha256": "be6bb88bfcd82d525c04b54bf1c3364d305ab7cc000eec0149eb736a3bfeec71"
+    },
+    {
+      "bytes": 7896,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_menu_keyboard.rs",
+      "sha256": "c6f0b75dc237cd48fd58e844a393f207212e9165e2c824e852be31e5adcd5794"
+    },
+    {
+      "bytes": 15611,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_middle_navigation.rs",
+      "sha256": "0ec54d5e2b5a4484e3b521f976bfa5aa5d2a04918e22506b4bb51993f7b93a03"
+    },
+    {
+      "bytes": 10085,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_native_gpu_playback.rs",
+      "sha256": "5ba07929fecff8814bf7480daa44e05de2d182d8f1c5c2c8769edfc44e210284"
+    },
+    {
+      "bytes": 24020,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_preview_cache_budget.rs",
+      "sha256": "10d4c7c731a421454f0df83a38e9a3111b83951110d18c1a7cdf37bbe0d5e256"
+    },
+    {
+      "bytes": 15280,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_project_shape_snapping.rs",
+      "sha256": "73166d630ac00834910aa65db02d910a0ea984a5dc69bc6cac58350ab820c522"
+    },
+    {
+      "bytes": 11994,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_properties_bulk_keyframes.rs",
+      "sha256": "9e679940bdf488bcd63eabd8b5285c85ebbe4d764b909173ed635c03ca627fb9"
+    },
+    {
+      "bytes": 6246,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_properties_key_bounds.rs",
+      "sha256": "d1c9c236819beca3ff0b0c5548f08d163a1f64e32759c16e9a3e3d100e3a59b9"
+    },
+    {
+      "bytes": 8268,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_scaling.rs",
+      "sha256": "03c42b6d78e48c120af4b5bb6604590b5f001922edc62fdc7b78aa879cd0c0fd"
+    },
+    {
+      "bytes": 5004,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_settings_info.rs",
+      "sha256": "9d33e0b75158a0a69fe972e41a4fab95aeb7e27a64e0a8e9a1084278dacfdf2a"
+    },
+    {
+      "bytes": 4498,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_timeline_source.rs",
+      "sha256": "e13a874a6d5bc7a563ac3ebd143c43afae2264dec6455dad9a376c782128fa53"
+    },
+    {
+      "bytes": 20221,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_timeline_workflow.rs",
+      "sha256": "7506c9aa6c7d50a468e1759675eae415265192a961fff864670de37992d7b49e"
+    },
+    {
+      "bytes": 11698,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_viewer_edge_on.rs",
+      "sha256": "9eba2a08a550ca0b04340a443f68867fa20e78172b85b0a52abe75a736265e61"
+    },
+    {
+      "bytes": 18310,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_viewer_transforms.rs",
+      "sha256": "17f0ba4ce4e3854fc57f7edfce4b5c6b8ea48d92a3847299d045931adb02098d"
+    },
+    {
+      "bytes": 3135,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_viewer_workspace.rs",
+      "sha256": "713a966aa92706b1273565814fe082e34c68f86e5bd63fef5b6175b638e8e7dc"
+    },
+    {
+      "bytes": 6546,
+      "kind": "untracked",
+      "mode": "100644",
+      "path": "crates/ui-egui/tests/ui_workspace_persistence.rs",
+      "sha256": "1f48f3167a723992cce499337829208abd7f8b1f3064a919067ccca43cbbc63f"
+    }
+  ],
+  "created_utc": "2026-10-19T18:58:27.300086+00:00",
+  "deleted_source_and_artifact_losses": [
+    {
+      "path": "effectcraft/.tmp/consolidation-effect-20261016",
+      "state": "deleted before backup; raw receipts/logs/source proposals and helper bytes no longer available on disk"
+    },
+    {
+      "candidate_tree": "3f2ceff890e9af0f5a758c944b073a5f506f54c4",
+      "candidate_tree_local_state": "missing; not reconstructed or represented as backed up",
+      "path": "effectcraft/.tmp/worktrees/consolidation-pr464-currentef74-20261019-v1",
+      "physical_source_sha256": "c5b45af636c76b8625ff3f4b8e192bc70f30bec75be2d051bcad2b5da7fe6415",
+      "state": "exact uncommitted qualified ProRes candidate missing"
+    },
+    {
+      "scope": "Current-ef74 uncommitted Remove/GetFiles/Folder.temp/relative-seek tests-only baseline pairs and ScriptUI/Ease isolated compositions",
+      "state": "lost with .tmp; older canonical/committed variants may remain, but exact deleted source packets are not recovered by this snapshot"
+    },
+    {
+      "scope": "effectcraft/target including normal ProRes GUI and historical selected executable archives under .tmp",
+      "state": "deleted before backup; no binary/runtime evidence reconstructed; no validation credit for recovery snapshot"
+    }
+  ],
+  "kind": "UNTESTED SOURCE RECOVERY \u2014 NOT A FEATURE RELEASE",
+  "limits": [
+    "Canonical aggregate preserves existing work as found; it is not a set of independently validated feature changes.",
+    "Branch variants remain separate, with original commit ancestry retained.",
+    "Deleted working-tree files, logs, captures and build outputs are not recoverable from this backup unless independently present in surviving source/history.",
+    "No upstream merge, feature PR update, workflow dispatch, or runtime validation is part of this preservation."
+  ],
+  "original_branch_refs": [
+    {
+      "oid": "2f0c38cd8eac34ec7c14eaabd60c14551e21cfd1",
+      "ref": "refs/heads/backup/pr464-before-r48"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/atomic-property-and-batch"
+    },
+    {
+      "oid": "cae67546dd8db672706698a3ad897b758b0339f3",
+      "ref": "refs/heads/fix/audio-clock"
+    },
+    {
+      "oid": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "ref": "refs/heads/fix/audio-sample-boundaries35"
+    },
+    {
+      "oid": "549e9d825132986d6167c1432cd3328efcbb0278",
+      "ref": "refs/heads/fix/avlayer-replace-source-r49"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/batch-history-budget"
+    },
+    {
+      "oid": "e52ce29579732af9eca6fe1128051d5965bcd1c0",
+      "ref": "refs/heads/fix/cli-input-preservation-r48"
+    },
+    {
+      "oid": "fc3643ad1754c4fb92ad6d8a77728c52310c1fba",
+      "ref": "refs/heads/fix/cli-render-empty-r49"
+    },
+    {
+      "oid": "4751a462dc0f2422912c4bda1d5e056d2d54b9f2",
+      "ref": "refs/heads/fix/cli-template-rendering"
+    },
+    {
+      "oid": "887b4916d7d70a7af3db2d05d47d278a5c72c165",
+      "ref": "refs/heads/fix/collect-proxies-r48"
+    },
+    {
+      "oid": "b0cceb172350dd1fc488fcc887563d1c81004ba9",
+      "ref": "refs/heads/fix/dock-tab-identity"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/docking-interactions"
+    },
+    {
+      "oid": "549e9d825132986d6167c1432cd3328efcbb0278",
+      "ref": "refs/heads/fix/ease-presets-handles-r51"
+    },
+    {
+      "oid": "c2f790b1d967c658bfb7d4a2a682f6e17951eafe",
+      "ref": "refs/heads/fix/ease-presets-handles-r54"
+    },
+    {
+      "oid": "34b894a2492047f4a30458d1bf6585a525c8835a",
+      "ref": "refs/heads/fix/export-audio-sample-positions"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/export-paths-sequences"
+    },
+    {
+      "oid": "cae67546dd8db672706698a3ad897b758b0339f3",
+      "ref": "refs/heads/fix/exr-input"
+    },
+    {
+      "oid": "549e9d825132986d6167c1432cd3328efcbb0278",
+      "ref": "refs/heads/fix/file-remove-symlink-r53"
+    },
+    {
+      "oid": "c2f790b1d967c658bfb7d4a2a682f6e17951eafe",
+      "ref": "refs/heads/fix/file-remove-symlink-r54"
+    },
+    {
+      "oid": "c12f48176ff946702c7fcc78627c4435304f5963",
+      "ref": "refs/heads/fix/file-rename-r49"
+    },
+    {
+      "oid": "549e9d825132986d6167c1432cd3328efcbb0278",
+      "ref": "refs/heads/fix/folder-temp-r51"
+    },
+    {
+      "oid": "c2f790b1d967c658bfb7d4a2a682f6e17951eafe",
+      "ref": "refs/heads/fix/folder-temp-r54"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/frame-rate-boundaries"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/frame-rate-normalization"
+    },
+    {
+      "oid": "6d99f68330b3732377cc5bdcf078ec0ffd8c8a27",
+      "ref": "refs/heads/fix/gpu-threshold-parity"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/history-level-limit"
+    },
+    {
+      "oid": "0a265131ce81f0654dcf87b2e009fffc0b06a554",
+      "ref": "refs/heads/fix/history-trim"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/image-sequence-import-options"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/image-sequence-workflows"
+    },
+    {
+      "oid": "8eb77a7d1e22c32632281b44839dc97f01cc3c8d",
+      "ref": "refs/heads/fix/key-attribute-selection-order"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/keyframe-time-base"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/label-menu-swatches"
+    },
+    {
+      "oid": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "ref": "refs/heads/fix/locked-key-metadata-a6c"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/mcp-atomic-keyframes"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/mesh-warp-viewer"
+    },
+    {
+      "oid": "cae67546dd8db672706698a3ad897b758b0339f3",
+      "ref": "refs/heads/fix/model-correctness"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/model-geometry-budget"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/model-texture-budget"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/native-gpu-preview-textures"
+    },
+    {
+      "oid": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "ref": "refs/heads/fix/parenting-3d"
+    },
+    {
+      "oid": "cac47626f394bb0f0ee44857839af46d7ee6042e",
+      "ref": "refs/heads/fix/parenting-3d-position"
+    },
+    {
+      "oid": "cae67546dd8db672706698a3ad897b758b0339f3",
+      "ref": "refs/heads/fix/particle-camera"
+    },
+    {
+      "oid": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "ref": "refs/heads/fix/particle-camera-a6c35"
+    },
+    {
+      "oid": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "ref": "refs/heads/fix/project-color-settings"
+    },
+    {
+      "oid": "a7a6295bb00d7d1ddc18ae286c0036de35f1f8a4",
+      "ref": "refs/heads/fix/property-key-time-bases"
+    },
+    {
+      "oid": "2f0c38cd8eac34ec7c14eaabd60c14551e21cfd1",
+      "ref": "refs/heads/fix/prores-srgb-transfer"
+    },
+    {
+      "oid": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "ref": "refs/heads/fix/prores-transfer"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/puppet-rest-pose"
+    },
+    {
+      "oid": "cae67546dd8db672706698a3ad897b758b0339f3",
+      "ref": "refs/heads/fix/remote-workflow-gaps"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/scrub-queue-freshness"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/selection-sanitize"
+    },
+    {
+      "oid": "e4ca1e919a9d8ddf5463eafca78aaca2de12ca5c",
+      "ref": "refs/heads/fix/settings-info-return"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/slip-loop-duration"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/source-span-frame-count"
+    },
+    {
+      "oid": "c37b88602f7a161f885e21fed7b4744fd5f0e3b1",
+      "ref": "refs/heads/fix/time-boundaries-cancellation"
+    },
+    {
+      "oid": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "ref": "refs/heads/fix/time-numeric-bounds"
+    },
+    {
+      "oid": "36ebe2eada940f8f8fa3589fbdb41adcab4810f4",
+      "ref": "refs/heads/fix/time-to-frames-duration-r48"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/fix/timeline-workflow"
+    },
+    {
+      "oid": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "ref": "refs/heads/fix/uid-checked-loading35"
+    },
+    {
+      "oid": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "ref": "refs/heads/main"
+    },
+    {
+      "oid": "813c7c4650f0d4c805da620c8d5837c9600ad2e3",
+      "ref": "refs/heads/proof/audio-sample-positions-r46-before"
+    },
+    {
+      "oid": "4751a462dc0f2422912c4bda1d5e056d2d54b9f2",
+      "ref": "refs/heads/proof/cli-template-hard-link-r46-before"
+    },
+    {
+      "oid": "813c7c4650f0d4c805da620c8d5837c9600ad2e3",
+      "ref": "refs/heads/proof/dock-tab-identity-r46-before"
+    },
+    {
+      "oid": "813c7c4650f0d4c805da620c8d5837c9600ad2e3",
+      "ref": "refs/heads/proof/history-trim-r46-before"
+    },
+    {
+      "oid": "813c7c4650f0d4c805da620c8d5837c9600ad2e3",
+      "ref": "refs/heads/proof/key-attributes-identity-r45-before"
+    },
+    {
+      "oid": "9144eef2695f5db9880d7010a53fb94fe2993671",
+      "ref": "refs/heads/proof/key-time-post-snap-bounds-r44-before"
+    },
+    {
+      "oid": "9144eef2695f5db9880d7010a53fb94fe2993671",
+      "ref": "refs/heads/proof/key-time-reply-contract-r44-baseline"
+    },
+    {
+      "oid": "9144eef2695f5db9880d7010a53fb94fe2993671",
+      "ref": "refs/heads/proof/key-time-reply-contract-r44-baseline-v2"
+    },
+    {
+      "oid": "9144eef2695f5db9880d7010a53fb94fe2993671",
+      "ref": "refs/heads/proof/key-time-reply-contract-r44-immutable-candidate-v2"
+    },
+    {
+      "oid": "0914a25fd20c8fb62855d5cfe3eef4ed06627a72",
+      "ref": "refs/heads/repair/collect-proxies-r54"
+    },
+    {
+      "oid": "71470935729299a026165ce1f03f6b7de5e801b5",
+      "ref": "refs/heads/repair/pr464-r48"
+    }
+  ],
+  "reason": "User-directed preservation before clearing Artcraft after external loss of .tmp and target. No CI or runtime was run for these backups.",
+  "separate_branch_backups": [
+    {
+      "branch": "recovery/untested-20261019-1853/local-0914a25fd20c",
+      "original_commit": "0914a25fd20c8fb62855d5cfe3eef4ed06627a72",
+      "original_refs": [
+        "refs/heads/repair/collect-proxies-r54"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-0a265131ce81",
+      "original_commit": "0a265131ce81f0654dcf87b2e009fffc0b06a554",
+      "original_refs": [
+        "refs/heads/fix/history-trim"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-2f0c38cd8eac",
+      "original_commit": "2f0c38cd8eac34ec7c14eaabd60c14551e21cfd1",
+      "original_refs": [
+        "refs/heads/backup/pr464-before-r48",
+        "refs/heads/fix/prores-srgb-transfer"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-34b894a24920",
+      "original_commit": "34b894a2492047f4a30458d1bf6585a525c8835a",
+      "original_refs": [
+        "refs/heads/fix/export-audio-sample-positions"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-36ebe2eada94",
+      "original_commit": "36ebe2eada940f8f8fa3589fbdb41adcab4810f4",
+      "original_refs": [
+        "refs/heads/fix/time-to-frames-duration-r48"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-4751a462dc0f",
+      "original_commit": "4751a462dc0f2422912c4bda1d5e056d2d54b9f2",
+      "original_refs": [
+        "refs/heads/fix/cli-template-rendering",
+        "refs/heads/proof/cli-template-hard-link-r46-before"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-549e9d825132",
+      "original_commit": "549e9d825132986d6167c1432cd3328efcbb0278",
+      "original_refs": [
+        "refs/heads/fix/avlayer-replace-source-r49",
+        "refs/heads/fix/ease-presets-handles-r51",
+        "refs/heads/fix/file-remove-symlink-r53",
+        "refs/heads/fix/folder-temp-r51"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-6d99f68330b3",
+      "original_commit": "6d99f68330b3732377cc5bdcf078ec0ffd8c8a27",
+      "original_refs": [
+        "refs/heads/fix/gpu-threshold-parity"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-714709357292",
+      "original_commit": "71470935729299a026165ce1f03f6b7de5e801b5",
+      "original_refs": [
+        "refs/heads/repair/pr464-r48"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-813c7c4650f0",
+      "original_commit": "813c7c4650f0d4c805da620c8d5837c9600ad2e3",
+      "original_refs": [
+        "refs/heads/proof/audio-sample-positions-r46-before",
+        "refs/heads/proof/dock-tab-identity-r46-before",
+        "refs/heads/proof/history-trim-r46-before",
+        "refs/heads/proof/key-attributes-identity-r45-before"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-887b4916d7d7",
+      "original_commit": "887b4916d7d70a7af3db2d05d47d278a5c72c165",
+      "original_refs": [
+        "refs/heads/fix/collect-proxies-r48"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-8eb77a7d1e22",
+      "original_commit": "8eb77a7d1e22c32632281b44839dc97f01cc3c8d",
+      "original_refs": [
+        "refs/heads/fix/key-attribute-selection-order"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-9144eef2695f",
+      "original_commit": "9144eef2695f5db9880d7010a53fb94fe2993671",
+      "original_refs": [
+        "refs/heads/proof/key-time-post-snap-bounds-r44-before",
+        "refs/heads/proof/key-time-reply-contract-r44-baseline",
+        "refs/heads/proof/key-time-reply-contract-r44-baseline-v2",
+        "refs/heads/proof/key-time-reply-contract-r44-immutable-candidate-v2"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-a6c72acf94b0",
+      "original_commit": "a6c72acf94b02e1884ee9123d0f9b071dba83ced",
+      "original_refs": [
+        "refs/heads/fix/audio-sample-boundaries35",
+        "refs/heads/fix/locked-key-metadata-a6c",
+        "refs/heads/fix/parenting-3d",
+        "refs/heads/fix/particle-camera-a6c35",
+        "refs/heads/fix/project-color-settings",
+        "refs/heads/fix/prores-transfer",
+        "refs/heads/fix/time-numeric-bounds",
+        "refs/heads/fix/uid-checked-loading35"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-a7a6295bb00d",
+      "original_commit": "a7a6295bb00d7d1ddc18ae286c0036de35f1f8a4",
+      "original_refs": [
+        "refs/heads/fix/property-key-time-bases"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-b0cceb172350",
+      "original_commit": "b0cceb172350dd1fc488fcc887563d1c81004ba9",
+      "original_refs": [
+        "refs/heads/fix/dock-tab-identity"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-c12f48176ff9",
+      "original_commit": "c12f48176ff946702c7fcc78627c4435304f5963",
+      "original_refs": [
+        "refs/heads/fix/file-rename-r49"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-c2f790b1d967",
+      "original_commit": "c2f790b1d967c658bfb7d4a2a682f6e17951eafe",
+      "original_refs": [
+        "refs/heads/fix/ease-presets-handles-r54",
+        "refs/heads/fix/file-remove-symlink-r54",
+        "refs/heads/fix/folder-temp-r54"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-c37b88602f7a",
+      "original_commit": "c37b88602f7a161f885e21fed7b4744fd5f0e3b1",
+      "original_refs": [
+        "refs/heads/fix/time-boundaries-cancellation"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-cac47626f394",
+      "original_commit": "cac47626f394bb0f0ee44857839af46d7ee6042e",
+      "original_refs": [
+        "refs/heads/fix/parenting-3d-position"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-cae67546dd8d",
+      "original_commit": "cae67546dd8db672706698a3ad897b758b0339f3",
+      "original_refs": [
+        "refs/heads/fix/audio-clock",
+        "refs/heads/fix/exr-input",
+        "refs/heads/fix/model-correctness",
+        "refs/heads/fix/particle-camera",
+        "refs/heads/fix/remote-workflow-gaps"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-d60cb71e297a",
+      "original_commit": "d60cb71e297a4bb76851b27b48c0014b56ccab69",
+      "original_refs": [
+        "refs/heads/fix/atomic-property-and-batch",
+        "refs/heads/fix/batch-history-budget",
+        "refs/heads/fix/docking-interactions",
+        "refs/heads/fix/export-paths-sequences",
+        "refs/heads/fix/frame-rate-boundaries",
+        "refs/heads/fix/frame-rate-normalization",
+        "refs/heads/fix/history-level-limit",
+        "refs/heads/fix/image-sequence-import-options",
+        "refs/heads/fix/image-sequence-workflows",
+        "refs/heads/fix/keyframe-time-base",
+        "refs/heads/fix/label-menu-swatches",
+        "refs/heads/fix/mcp-atomic-keyframes",
+        "refs/heads/fix/mesh-warp-viewer",
+        "refs/heads/fix/model-geometry-budget",
+        "refs/heads/fix/model-texture-budget",
+        "refs/heads/fix/native-gpu-preview-textures",
+        "refs/heads/fix/puppet-rest-pose",
+        "refs/heads/fix/scrub-queue-freshness",
+        "refs/heads/fix/selection-sanitize",
+        "refs/heads/fix/slip-loop-duration",
+        "refs/heads/fix/source-span-frame-count",
+        "refs/heads/fix/timeline-workflow",
+        "refs/heads/main"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-e4ca1e919a9d",
+      "original_commit": "e4ca1e919a9d8ddf5463eafca78aaca2de12ca5c",
+      "original_refs": [
+        "refs/heads/fix/settings-info-return"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-e52ce2957973",
+      "original_commit": "e52ce29579732af9eca6fe1128051d5965bcd1c0",
+      "original_refs": [
+        "refs/heads/fix/cli-input-preservation-r48"
+      ]
+    },
+    {
+      "branch": "recovery/untested-20261019-1853/local-fc3643ad1754",
+      "original_commit": "fc3643ad1754c4fb92ad6d8a77728c52310c1fba",
+      "original_refs": [
+        "refs/heads/fix/cli-render-empty-r49"
+      ]
+    }
+  ],
+  "surviving_linked_index_result": "57 indexes read; all matched their respective HEAD trees; no additional staged variant recovered"
+}

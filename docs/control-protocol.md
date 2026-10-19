@@ -123,3 +123,18 @@ Editor transform box, timeline Alt-drag scaling).
 
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
 see [agents.md](agents.md).
+
+Keyframe command times (`prop.set`, `prop.addKey`, `keys.set`, `keys.select`) default to layer
+seconds. Set `timeBase: "comp"` to use the same comp seconds as `prop.get` and `time.set`;
+`keys.set.newTime` and every `keys.select.keys[].time` use that base too. Writes snap to comp
+frames on offset, stretched and reversed layers. Explicit bases return timing metadata
+(`layerTime`, `compTime`, plus `value` or `count` as applicable); ordinary calls on unsplit properties keep their
+legacy scalar reply. A key outside the layer's `[in, out)` range returns a `warning` with its
+timing, even when `timeBase` is omitted. `prop.get.keys` always reports both time bases.
+Set a layer's offset with `layer.timing {layer, start}` (comp seconds).
+
+For separated Position, `prop.get.value` combines the active X/Y/Z tracks. Its additive
+`keyProperties` field lists their property UIDs and `axisProperties` contains each track's
+ordinary `prop.get` reply, including key timing. The leader's legacy `keys` field remains its
+own keys. `prop.addKey`, `prop.toggleKey` and `prop.toggleAnimation` on the leader edit the
+active axes together; static-only properties reject keyframe creation without editing history.

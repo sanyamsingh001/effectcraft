@@ -153,6 +153,23 @@ fn textures_sample_bilinear_with_wrap_modes() {
     assert_eq!(shade::sample(&c, &texels, 1.0, 0.5)[0], 1.0);
 }
 
+#[test]
+fn model_texture_sampling_bounds_extreme_uvs() {
+    let texels = [[0.25, 0.5, 0.75, 1.0]];
+    for mode in 0..=2 {
+        let t = TexInfo { offset: 0, width: 1, height: 1, wrap_u: mode, wrap_v: mode };
+        for uv in [f32::MAX, -f32::MAX, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(shade::sample(&t, &texels, uv, uv), texels[0]);
+        }
+    }
+    let t = TexInfo { offset: u32::MAX, width: u32::MAX, height: u32::MAX, wrap_u: 1, wrap_v: 1 };
+    assert_eq!(shade::sample(&t, &texels, f32::MAX, f32::MAX), [0.0; 4]);
+    let t = TexInfo { offset: 0, width: 2, height: 1, wrap_u: 2, wrap_v: 1 };
+    let texels = [[0.0, 0.0, 0.0, 1.0], [1.0; 4]];
+    assert_eq!(shade::sample(&t, &texels, 2.25, 0.5), texels[0]);
+    assert_eq!(shade::sample(&t, &texels, 1.25, 0.5), texels[1]);
+}
+
 // ---------------------------------------------------------------- full renderer
 
 fn project(w: u32, h: u32) -> (Project, ItemId) {
@@ -534,4 +551,67 @@ fn stroke_regions_are_rings() {
     let outlines = effectcraft_model::extrude::group_contours(scene::contours(&r, 0.25));
     assert_eq!(outlines.len(), 1);
     assert_eq!(outlines[0].holes.len(), 1);
+}
+
+/// glTF colour textures are sRGB even when the composition blends or works in linear light.
+#[test]
+fn imported_model_colour_textures_match_material_factors_in_linear_projects() {
+    use effectcraft_model::{Material as ModelMaterial, TexRef, Texture};
+    use effectcraft_project::{BitDepth, Footage, FootageKind};
+    use std::sync::Arc;
+    struct Source(Arc<effectcraft_model::Model>);
+    impl crate::FootageSource for Source {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<crate::Image>> {
+            None
+        }
+        fn model(&self, _: ItemId, _: &Footage) -> Option<Arc<effectcraft_model::Model>> {
+            Some(self.0.clone())
+        }
+    }
+    let srgb = [0.25, 0.5, 0.75];
+    let render_model = |textured: bool, linearize: bool, blend_linear: bool, emissive: bool| {
+        let (mut p, cid) = project(32, 24);
+        p.settings.bit_depth = BitDepth::Bpc32;
+        p.settings.working_space = Some(effectcraft_color::ColorSpace::Srgb);
+        p.settings.linearize = linearize;
+        p.settings.blend_linear = blend_linear;
+        let mut material = ModelMaterial { unlit: true, double_sided: true, ..ModelMaterial::default() };
+        let linear = srgb.map(shade::srgb_to_linear);
+        if emissive {
+            material.base_color = [0.0, 0.0, 0.0, 1.0];
+            material.emissive = if textured { [1.0; 3] } else { linear };
+            material.emissive_tex = textured.then_some(TexRef { texture: 0, uv_set: 0 });
+        } else {
+            material.base_color = if textured { [1.0; 4] } else { [linear[0], linear[1], linear[2], 1.0] };
+            material.base_color_tex = textured.then_some(TexRef { texture: 0, uv_set: 0 });
+        }
+        let mut model = effectcraft_model::prim::model(
+            effectcraft_model::prim::PrimitiveKind::Plane,
+            &effectcraft_model::prim::PrimParams { size: [20.0, 16.0, 0.0], ..Default::default() },
+            material,
+        );
+        model.textures.push(Arc::new(Texture::solid([srgb[0], srgb[1], srgb[2], 1.0])));
+        let item = p.add_item(
+            "Synthetic model",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { kind: FootageKind::Model, has_video: true, ..Default::default() }),
+        );
+        add(&mut p, cid, LayerSource::Model { item }, |_| {});
+        let source = Source(Arc::new(model));
+        Renderer::new(&p, &source, RenderOpts::default()).comp_frame(cid, Tick::ZERO).get(16, 12)
+    };
+    for (linearize, blend_linear) in [(false, false), (true, false), (false, true)] {
+        for emissive in [false, true] {
+            let factor = render_model(false, linearize, blend_linear, emissive);
+            let texture = render_model(true, linearize, blend_linear, emissive);
+            assert!(factor[3] > 0.99 && texture[3] > 0.99);
+            for channel in 0..3 {
+                assert!(
+                    (texture[channel] - factor[channel]).abs() < 1e-5,
+                    "linearize={linearize}, blend_linear={blend_linear}, emissive={emissive}: {texture:?} vs {factor:?}"
+                );
+            }
+        }
+    }
 }

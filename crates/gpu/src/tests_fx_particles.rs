@@ -143,3 +143,58 @@ fn curl_noise() {
     );
     case("ec.noise.curlnoise", &[("displacementAmount", n(0.0))], 0.0, 0.0);
 }
+
+#[test]
+fn particle_world_active_camera_matches_cpu() {
+    use crate::tests::{Scene, check, diff, gpu, set};
+    use effectcraft_project::{BitDepth, Comp, LayerSource, build};
+    use effectcraft_render::{Accelerator, Backend, NoFootage, RenderOpts, Renderer};
+    use effectcraft_time::{FrameRate, Tick};
+    let Some(gpu) = gpu() else { return };
+    assert!(Accelerator::supports_effect(gpu, "ec.sim.ccparticleworld"));
+    let mut s = Scene::new(BitDepth::Bpc32);
+    s.comp = Comp::new(96, 64, FrameRate::FPS_30, Tick::from_seconds_f64(2.5));
+    *s.p.comp_mut(s.cid).unwrap() = s.comp.clone();
+    let mut particles = s.solid([0.0; 3], 96, 64);
+    s.effect(
+        &mut particles,
+        "ec.sim.ccparticleworld",
+        &[
+            ("birthRate", n(2.0)),
+            ("longevity", n(3.0)),
+            ("producer/producerX", n(0.12)),
+            ("producer/producerY", n(0.08)),
+            ("producer/producerZ", n(0.25)),
+            ("producer/radiusX", n(0.07)),
+            ("producer/radiusY", n(0.06)),
+            ("producer/radiusZ", n(0.13)),
+            ("physics/velocity", n(0.0)),
+            ("physics/gravity", n(0.0)),
+            ("particle/particleType", e(1)),
+            ("particle/birthSize", n(0.2)),
+            ("particle/deathSize", n(0.2)),
+        ],
+    );
+    s.push(particles);
+    let mut camera = build::layer(&mut s.p, &s.comp, "Camera", LayerSource::Camera, (96, 64), None);
+    set(&mut camera, "cameraOptions/zoom", n(192.0));
+    let camera_id = s.push(camera);
+    let time = Tick::from_seconds_f64(1.0);
+    for (x, rotation, enabled) in [(48.0, 0.0, true), (65.0, 0.0, true), (48.0, 35.0, true), (48.0, 0.0, false)] {
+        let camera = s.p.comp_mut(s.cid).unwrap().layer_mut(camera_id).unwrap();
+        camera.switches.video = enabled;
+        set(camera, "transform/position", Value::Vec3([x, 32.0, -192.0]));
+        set(camera, "transform/poi", Value::Vec3([x, 32.0, 0.0]));
+        set(camera, "transform/rotation", n(rotation));
+        let options = RenderOpts { motion_blur: false, ..Default::default() };
+        let cpu = Renderer::new(&s.p, &NoFootage, RenderOpts { backend: Backend::Cpu, ..options }).comp_frame_cpu(s.cid, time);
+        let mut renderer = Renderer::new(&s.p, &NoFootage, RenderOpts { backend: Backend::Gpu, ..options });
+        renderer.accel = Some(gpu);
+        let actual = gpu.render(&renderer, s.cid, time).expect("active camera GPU compositor");
+        for image in [&cpu, &actual] {
+            assert!(image.data.iter().flatten().all(|v| v.is_finite()));
+            assert!(image.data.iter().any(|p| p[0] + p[1] + p[2] > 0.05), "generated particles must be visible");
+        }
+        check(&format!("Particle World camera x={x} rotation={rotation} enabled={enabled}"), Some(diff(&cpu, &actual, 1e-3)), 0.0);
+    }
+}

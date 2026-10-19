@@ -182,7 +182,17 @@ fn new_comp_from_selection(s: &mut Session, p: &Value) -> Result<Value> {
     });
     let queue = b_p(p, "addToRenderQueue").unwrap_or(false);
     let proj = s.project.clone();
-    let duration = |i: ItemId| proj.item(i).and_then(|it| it.duration()).filter(|d| *d > Tick::ZERO).unwrap_or(Tick::from_seconds_f64(still));
+    let duration = |i: ItemId| {
+        proj.item(i)
+            .and_then(|it| match &it.kind {
+                ItemKind::Footage(f) if f.kind == FootageKind::Sequence || (f.kind == FootageKind::Video && f.loop_count > 1) => {
+                    it.source_span().map(|(duration, _)| duration).or_else(|| it.duration())
+                }
+                _ => it.duration(),
+            })
+            .filter(|d| *d > Tick::ZERO)
+            .unwrap_or(Tick::from_seconds_f64(still))
+    };
     let groups: Vec<Vec<ItemId>> = if single { vec![items.clone()] } else { items.iter().map(|i| vec![*i]).collect() };
     super::app_more::grouped(s, "New Comp from Selection", |s| {
         let mut made = vec![];
@@ -582,7 +592,7 @@ impl Interpretation {
             ),
         };
         it.invert_alpha = super::b_p(p, "invertAlpha");
-        it.loops = p.get("loop").and_then(Value::as_u64).map(|v| v.clamp(1, 9999) as u32);
+        it.loops = f_p(p, "loop").filter(|v| v.is_finite() && *v >= 0.0 && v.fract() == 0.0).map(|v| v.clamp(1.0, 9999.0) as u32);
         it.par = f_p(p, "pixelAspect").filter(|x| *x > 0.0);
         it.fields = match str_p(p, "fields") {
             Some(f) => Some(effectcraft_project::FieldOrder::parse(f).ok_or_else(|| bad(cmd, "fields: off|upper|lower"))?),
@@ -603,12 +613,13 @@ impl Interpretation {
 
     pub(crate) fn apply(&self, f: &mut Footage, guessed: Option<(AlphaMode, [f32; 3])>) {
         let before = f.frame_rate;
+        let source_frames = f.source_frame_count();
         self.apply_settings(f, guessed);
         // Conforming keeps the frames and changes how long they last (12 frames at 30 fps are
         // 0.4 s; conformed to 12 fps, 1 s). Stills have no frame rate of their own.
         let (old, new) = (before.as_f64(), f.frame_rate.as_f64());
         if matches!(f.kind, FootageKind::Video | FootageKind::Sequence) && old > 0.0 && new > 0.0 && (old - new).abs() > 1e-9 {
-            let frames = (f.duration.seconds() * old).round() as i64;
+            let frames = source_frames.unwrap_or_else(|| (f.duration.seconds() * old).round() as i64);
             f.duration = f.frame_rate.tick_of(frames);
         }
     }
@@ -703,21 +714,12 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
         .collect();
     s.edit("Interpret Footage", None, |proj, _| {
         for (i, g) in items.iter().zip(&guesses) {
+            let old = proj.item(*i).and_then(|item| item.source_span()).map(|(duration, _)| duration);
             let Some(ItemKind::Footage(f)) = proj.item_mut(*i).map(|x| &mut x.kind) else { continue };
-            let old = f.duration;
             it.apply(f, *g);
-            let new = f.duration;
-            if new == old {
-                continue;
-            }
-            // Layers that ran to the footage's end still do (After Effects re-times them too).
-            let ids: Vec<ItemId> = proj.comps().map(|(id, _)| *id).collect();
-            for cid in ids {
-                for l in proj.comp_mut(cid).into_iter().flat_map(|c| c.layers.iter_mut()) {
-                    if l.source.item() == Some(*i) && (l.stretch - 100.0).abs() < 1e-9 && l.out_point == l.start_time + old {
-                        l.out_point = l.start_time + new;
-                    }
-                }
+            let new = proj.item(*i).and_then(|item| item.source_span()).map(|(duration, _)| duration);
+            if let Some((old, new)) = old.zip(new) {
+                retime_full_length_layers(proj, *i, old, new);
             }
         }
         Ok(())
@@ -736,6 +738,26 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"items": out}))
 }
 
+/// Full-length layers keep following the footage's end after conforming; trimmed and
+/// stretched layers retain their edit.
+fn retime_full_length_layers(proj: &mut Project, item: ItemId, old: Tick, new: Tick) {
+    if new == old {
+        return;
+    }
+    let ids: Vec<ItemId> = proj.comps().map(|(id, _)| *id).collect();
+    for cid in ids {
+        let Some(comp) = proj.comp_mut(cid) else { continue };
+        let rate = comp.frame_rate;
+        for l in &mut comp.layers {
+            let end = |duration: Tick| rate.snap_nearest(l.start_time + duration).max(l.start_time + rate.frame_duration());
+            let exact = l.out_point == l.start_time + old;
+            if l.source.item() == Some(item) && (l.stretch - 100.0).abs() < 1e-9 && (exact || l.out_point == end(old)) {
+                l.out_point = if exact { l.start_time + new } else { end(new) };
+            }
+        }
+    }
+}
+
 fn remember_interpretation(s: &mut Session, p: &Value) -> Result<Value> {
     let item = *items_p(s, p).first().ok_or_else(|| bad("file.rememberInterpretation", "select footage"))?;
     if let Some(ItemKind::Footage(f)) = s.project.item(item).map(|x| &x.kind) {
@@ -749,6 +771,7 @@ fn apply_interpretation(s: &mut Session, p: &Value) -> Result<Value> {
     let items = items_p(s, p);
     s.edit("Apply Interpretation", None, |proj, _| {
         for i in &items {
+            let old = proj.item(*i).and_then(|item| item.source_span()).map(|(duration, _)| duration);
             if let Some(ItemKind::Footage(f)) = proj.item_mut(*i).map(|x| &mut x.kind) {
                 f.alpha = src.alpha;
                 f.premul_color = src.premul_color;
@@ -759,10 +782,11 @@ fn apply_interpretation(s: &mut Session, p: &Value) -> Result<Value> {
                 f.linear_light = src.linear_light;
                 f.color_profile = src.color_profile;
                 if src.native_rate.is_some() {
-                    if f.native_rate.is_none() {
-                        f.native_rate = Some(f.frame_rate);
-                    }
-                    f.frame_rate = src.frame_rate;
+                    Interpretation { rate: Some(src.frame_rate), ..Default::default() }.apply(f, None);
+                }
+                let new = proj.item(*i).and_then(|item| item.source_span()).map(|(duration, _)| duration);
+                if let Some((old, new)) = old.zip(new) {
+                    retime_full_length_layers(proj, *i, old, new);
                 }
             }
         }
@@ -784,6 +808,7 @@ fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
         retarget_layers(proj, item, |_| LayerSource::Footage { item });
         Ok(())
     })?;
+    crate::footage_check::refresh(s, item);
     Ok(Value::Null)
 }
 
@@ -851,10 +876,7 @@ fn reload(s: &mut Session, p: &Value) -> Result<Value> {
                 Ok(n) => n,
                 Err(_) => Footage { missing: true, ..f.clone() },
             };
-            // Keep the interpretation.
-            nf.alpha = f.alpha;
-            nf.loop_count = f.loop_count;
-            nf.pixel_aspect = f.pixel_aspect;
+            crate::footage_check::preserve_interpretation(&mut nf, f);
             updates.push((*i, nf));
         }
     }
@@ -867,6 +889,11 @@ fn reload(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(())
     })?;
+    for item in items {
+        if matches!(s.project.item(item).map(|it| &it.kind), Some(ItemKind::Footage(_))) {
+            crate::footage_check::refresh(s, item);
+        }
+    }
     s.events.push(crate::Event::PurgeCaches);
     Ok(json!({"reloaded": n}))
 }

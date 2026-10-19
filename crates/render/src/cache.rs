@@ -614,6 +614,23 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             effectcraft_effects::paint::cache_key(g, lt).0.hash(&mut h);
         }
     }
+
+    // Particle World sees the camera in layer coordinates. Transforms normally composite
+    // after content, but here the camera, layer and parents also affect the sprite projection.
+    let camera_dependent = layer.switches.effects
+        && layer.effects().is_some_and(|fx| {
+            fx.groups()
+                .take(effects.unwrap_or(usize::MAX))
+                .any(|g| g.enabled && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect } if effect == "ec.sim.ccparticleworld"))
+        });
+    if camera_dependent {
+        let active = ctx.comp.active_camera(ctx.time).is_some();
+        active.hash(&mut h);
+        if active {
+            hash_debug(&mut h, &(ctx.camera().0 * ctx.world_matrix(layer)).0);
+            hash_debug(&mut h, &ctx.layer_to_comp(layer).0);
+        }
+    }
     if time_dependent(layer) {
         layer.layer_time(ctx.time).0.hash(&mut h);
         // Effects also see the layer's time mapping.

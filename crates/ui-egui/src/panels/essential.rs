@@ -27,9 +27,45 @@ use egui::{Rect, RichText};
 use serde_json::{Value, json};
 
 use crate::panels::DragPayload;
-use crate::{EffectcraftApp, widgets};
+use crate::{
+    EffectcraftApp,
+    icons::{self, Icon},
+    widgets,
+};
 
 type Actions = Vec<(String, Value)>;
+
+#[derive(Clone, Copy)]
+struct ScaleMode {
+    comp: ItemId,
+    control: u64,
+    linked: bool,
+    dimensions: usize,
+}
+
+fn scale_mode(project: &effectcraft_engine::project::Project, comp: ItemId, control: &EgControl) -> Option<ScaleMode> {
+    let master = project.comp(comp)?.essential.as_ref()?.resolve(control.id)?;
+    let linked = master.scale_linked?;
+    let (layer, property) = essential::source_prop(project, comp, master)?;
+    let dimensions = if layer.is_3d() { property.value.components().len() } else { property.value.components().len().min(2) };
+    Some(ScaleMode { comp, control: master.id, linked, dimensions })
+}
+
+/// Apply the Timeline's ratio rules to visible components and keep hidden axes unchanged.
+fn scale_values(values: &[f64], dim: usize, value: f64, dimensions: usize, linked: bool) -> Vec<f64> {
+    let mut result = values.to_vec();
+    let dimensions = dimensions.min(values.len());
+    if dim >= dimensions {
+        return result;
+    }
+    if linked {
+        let active = super::timeline::constrained(&values[..dimensions], dim, value);
+        result[..dimensions].copy_from_slice(&active);
+    } else {
+        result[dim] = value;
+    }
+    result
+}
 
 /// The comp the panel edits: the Primary comp, else the active one.
 fn primary(app: &EffectcraftApp) -> Option<ItemId> {
@@ -219,6 +255,7 @@ fn controls(app: &mut EffectcraftApp, ui: &mut egui::Ui, cid: ItemId, list: &[Eg
                     match src {
                         Some((layer, lt, p)) => {
                             let v = p.value_at(lt);
+                            let scale = scale_mode(&app.session.project, cid, c);
                             if let Some(nv) = value_widget(
                                 app,
                                 ui,
@@ -226,6 +263,7 @@ fn controls(app: &mut EffectcraftApp, ui: &mut egui::Ui, cid: ItemId, list: &[Eg
                                 essential::effective_type(eg.resolve(c.id).unwrap_or(c), &p),
                                 &p,
                                 &v,
+                                (scale, &mut *actions),
                             ) {
                                 actions.push((
                                     "prop.set".into(),
@@ -317,7 +355,16 @@ fn name_label(app: &mut EffectcraftApp, ui: &mut egui::Ui, cid: ItemId, c: &EgCo
 }
 
 /// The editor for a control's value; returns the new value (JSON for `prop.set`).
-fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Option<ControlType>, p: &Property, v: &KV) -> Option<Value> {
+fn value_widget(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    auto: &str,
+    ty: Option<ControlType>,
+    p: &Property,
+    v: &KV,
+    scale: (Option<ScaleMode>, &mut Actions),
+) -> Option<Value> {
+    let (scale, actions) = scale;
     let ty = ty?;
     let mut out = None;
 
@@ -423,8 +470,32 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
             }
             r1.response.rect.union(r3.rect)
         }
+        ControlType::Scale if scale.is_some() => {
+            let scale = scale?;
+            let comps = v.components();
+            let tokens = app.tokens;
+            let (link_rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click());
+            icons::paint(ui.painter(), link_rect, Icon::Link, if scale.linked { tokens.accent } else { tokens.text_faint });
+            app.auto.add(&format!("{auto}.constrain"), link_rect, "Constrain Proportions");
+            if response.on_hover_text("Constrain Proportions").clicked() {
+                actions.push(("essential.setScaleLinked".into(), json!({"comp":scale.comp.0,"control":scale.control,"linked":!scale.linked})));
+            }
+            let mut rect = link_rect;
+            for (dim, value) in comps.iter().copied().enumerate().take(scale.dimensions.min(3)) {
+                let at = ui.next_widget_position();
+                let (value_rect, changed, _) =
+                    widgets::hot_number_at(ui, at, egui::Id::new(("eg-scale-value", auto, dim)), value, 0.5, (-1e9, 1e9), 1, "%", &tokens);
+                ui.advance_cursor_after_rect(value_rect);
+                app.auto.add(&format!("{auto}.{dim}"), value_rect, &format!("{} {}", p.name, ["X", "Y", "Z"][dim]));
+                rect = rect.union(value_rect);
+                if let Some(value) = changed {
+                    out = Some(json!(scale_values(&comps, dim, value, scale.dimensions, scale.linked)));
+                }
+            }
+            rect
+        }
         ControlType::Scale => {
-            // One percentage for every axis.
+            // Existing explicit uniform controls keep one percentage for every axis.
             let comps = v.components();
             let mut x = comps.first().copied().unwrap_or(100.0);
             let r = ui.add(egui::DragValue::new(&mut x).speed(0.5).suffix("%").max_decimals(1));
@@ -503,7 +574,9 @@ fn instance(app: &mut EffectcraftApp, ui: &mut egui::Ui, actions: &mut Actions) 
                 }
                 _ => {
                     let v = p.value_at(lt);
-                    if let Some(nv) = value_widget(app, ui, &auto, essential::effective_type(eg.resolve(c.id).unwrap_or(c), &p), &p, &v) {
+                    let scale = scale_mode(&app.session.project, src, c);
+                    if let Some(nv) = value_widget(app, ui, &auto, essential::effective_type(eg.resolve(c.id).unwrap_or(c), &p), &p, &v, (scale, &mut *actions))
+                    {
                         actions.push((
                             "essential.set".into(),
                             json!({"layer": layer.id.0, "control": c.id, "value": nv, "merge": format!("egi-{}-{}", layer.id.0, c.id)}),
@@ -538,4 +611,27 @@ fn instance(app: &mut EffectcraftApp, ui: &mut egui::Ui, actions: &mut Actions) 
             actions.push(("essential.revert".into(), json!({"layer": layer.id.0})));
         }
     });
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::scale_values;
+
+    #[test]
+    fn linked_2d_scale_preserves_ratios_and_hidden_z() {
+        assert_eq!(scale_values(&[100.0, 50.0, 30.0], 0, 200.0, 2, true), [200.0, 100.0, 30.0]);
+    }
+    #[test]
+    fn linked_3d_scale_uses_all_source_axes() {
+        assert_eq!(scale_values(&[100.0, 50.0, 30.0], 0, 200.0, 3, true), [200.0, 100.0, 60.0]);
+    }
+    #[test]
+    fn unlinked_scale_changes_only_the_edited_component() {
+        assert_eq!(scale_values(&[100.0, 50.0, 30.0], 1, 75.0, 2, false), [100.0, 75.0, 30.0]);
+    }
+    #[test]
+    fn linked_zero_scale_matches_timeline_rules_and_preserves_hidden_z() {
+        assert_eq!(scale_values(&[0.0, 0.0, 30.0], 0, 20.0, 2, true), [20.0, 20.0, 30.0]);
+        assert_eq!(scale_values(&[0.0, 50.0, 30.0], 0, 20.0, 2, true), [20.0, 50.0, 30.0]);
+    }
 }

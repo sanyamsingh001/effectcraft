@@ -670,6 +670,35 @@ fn agents_doc_tools_table_is_current() {
 }
 
 #[test]
+fn keyframe_tools_share_explicit_comp_time_on_offset_layers() {
+    let mut s = server();
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"duration": 20, "frameRate": 30}}));
+    call_json(&mut s, "execute_command", json!({"command": "layer.newSolid", "params": {"name": "A", "color": "#fff"}}));
+    call_json(&mut s, "execute_command", json!({"command": "layer.timing", "params": {"layer": "A", "start": 10.5, "in": 10.5, "out": 20}}));
+    let keys = call_json(
+        &mut s,
+        "add_keyframe",
+        json!({"layer": "A", "path": "transform/opacity", "keys": [{"time": 15.3, "value": 0}, {"time": 16, "value": 100}], "timeBase": "comp", "interpolation": "linear"}),
+    );
+    assert_eq!(keys["addedKeys"][0]["compTime"], 15.3);
+    assert_eq!(keys["keys"][0]["time"], 4.8);
+    let mid = call_json(&mut s, "get_property", json!({"layer": "A", "path": "transform/opacity", "time": 15.65}));
+    assert!((mid["value"].as_f64().unwrap() - 50.0).abs() < 1e-8);
+    let set = call_json(&mut s, "set_property", json!({"layer": "A", "path": "transform/opacity", "time": 15.5, "timeBase": "comp", "value": 60}));
+    assert_eq!(set["compTime"], 15.5);
+    assert_eq!(set["value"], 60.0);
+    // Default layer seconds must also read back at the written comp frame.
+    let legacy = call_json(&mut s, "set_property", json!({"layer": "A", "path": "transform/opacity", "time": 5.2, "value": 75}));
+    assert_eq!(legacy["compTime"], 15.7);
+    assert_eq!(legacy["value"], 75.0);
+    let outside = call_json(&mut s, "add_keyframe", json!({"layer": "A", "path": "transform/opacity", "time": 15.3, "value": 100}));
+    assert_eq!(outside["compTime"], 25.8);
+    assert!(outside["warning"].as_str().unwrap().contains("outside"));
+    let (content, error) = call(&mut s, "set_property", json!({"layer": "A", "path": "transform/opacity", "value": 20, "timeBase": "invalid"}));
+    assert!(error, "{content:?}");
+}
+
+#[test]
 fn autosave_checkpoints_batch_and_partially_failed_tools() {
     let dir = autosave_test_dir("partial");
     let mut s = server().with_autosave(&dir).unwrap();
@@ -679,8 +708,24 @@ fn autosave_checkpoints_batch_and_partially_failed_tools() {
     ]);
     let reply = s.handle(&msgs).unwrap();
     assert_eq!(reply.as_array().unwrap().len(), 2);
+    let project = s.backend().session().unwrap().project.clone();
+    let history = s.backend().session().unwrap().history.undo.len();
     let (_, failed) = call(&mut s, "add_keyframe", json!({"layer":"#1","path":"transform/opacity","keys":[{"time":0,"value":37}],"interpolation":"invalid"}));
-    assert!(failed, "the key was added, then the interpolation failed");
+    assert!(failed, "invalid interpolation rejects the atomic keyframe tool");
+    assert!(std::sync::Arc::ptr_eq(&s.backend().session().unwrap().project, &project));
+    assert_eq!(s.backend().session().unwrap().history.undo.len(), history);
+    assert!(call_json(&mut s, "get_property", json!({"layer":"#1","path":"transform/opacity"}))["keys"].as_array().unwrap().is_empty());
+    // An explicitly non-atomic tool can retain successful earlier work when a later step fails.
+    let (_, failed) = call(
+        &mut s,
+        "batch",
+        json!({"atomic":false,"steps":[
+            {"command":"prop.addKey","params":{"layer":"#1","path":"transform/opacity","time":0,"value":37}},
+            {"command":"prop.set","params":{"layer":"#1","path":"transform/nope","value":0}}
+        ]}),
+    );
+    assert!(failed, "the non-atomic batch added the key before its later invalid property");
+    assert_eq!(s.backend().session().unwrap().history.undo.len(), history + 1);
     let status = autosave_status(&mut s);
     let mut recovered = server();
     call_json(&mut recovered, "open_project", json!({"path":status["latestPath"]}));
@@ -709,7 +754,7 @@ fn autosave_isolation_also_applies_to_engine_autosaves_and_preference_changes() 
     call_json(
         &mut s,
         "batch",
-        json!({"steps":[
+        json!({"atomic":false,"steps":[
             {"command":"prefs.set","params":{"values":{"autoSave.location":"custom","autoSave.folder":desktop.to_string_lossy()}}},
             {"command":"file.autoSave","params":{}}
         ]}),

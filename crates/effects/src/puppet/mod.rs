@@ -169,6 +169,8 @@ pub struct Pin {
     pub kind: PinKind,
     pub uid: u64,
     pub rest: [f64; 2],
+    /// Barycentric attachment added to a posed mesh (#318). Legacy pins remain vertex handles.
+    pub attachment: bool,
     pub position: [f64; 2],
     pub scale: f64,
     pub rotation: f64,
@@ -210,6 +212,7 @@ pub fn parse(params: &Params) -> Vec<MeshParams> {
                     kind: PinKind::from_index(params.get(&q("kind")).map(Value::as_enum).unwrap_or(0)),
                     uid: fd(params, &q("@uid"), 0.0) as u64,
                     rest,
+                    attachment: params.get(&q("attachment")).is_some_and(Value::as_bool),
                     position: params.get(&q("position")).map(Value::as_vec2).unwrap_or(rest),
                     scale: fd(params, &q("scale"), 100.0) / 100.0,
                     rotation: fd(params, &q("rotation"), 0.0),
@@ -314,6 +317,49 @@ fn centroid(mesh: &Mesh, t: &[usize; 3]) -> [f64; 2] {
     [(v[t[0]][0] + v[t[1]][0] + v[t[2]][0]) / 3.0, (v[t[0]][1] + v[t[1]][1] + v[t[2]][1]) / 3.0]
 }
 
+/// Maximum barycentric attachments on a mesh. Each displaced attachment adds two raw
+/// solves; neutral attachments add none. This bounds scalar constraint storage to 64 rows.
+pub const MAX_ATTACHMENTS: usize = 32;
+
+fn attachment_point(mesh: &Mesh, rest: [f64; 2], position: [f64; 2]) -> Option<arap::PointTarget> {
+    if !rest.iter().chain(&position).all(|v| v.is_finite()) {
+        return None;
+    }
+    mesh.tris.iter().find_map(|t| {
+        let (a, b, c) = (mesh.verts.get(t[0])?, mesh.verts.get(t[1])?, mesh.verts.get(t[2])?);
+        let weights = bary(*a, *b, *c, rest)?;
+        if !weights.iter().all(|w| w.is_finite() && *w >= -1e-9) {
+            return None;
+        }
+        let weights = weights.map(|w| w.max(0.0));
+        let sum = weights.iter().sum::<f64>();
+        if !sum.is_finite() || sum <= 0.0 {
+            return None;
+        }
+        Some(arap::PointTarget { vertices: *t, weights: weights.map(|w| w / sum), position })
+    })
+}
+
+/// Whether a new barycentric constraint is independent of the mesh's existing handles.
+/// Reject redundant bindings at insertion rather than creating an immovable pin.
+pub fn can_attach(mesh: &Mesh, pins: &[Pin], rest: [f64; 2]) -> bool {
+    let attached = pins.iter().filter(|p| p.attachment && p.kind == PinKind::Position).count();
+    if attached >= MAX_ATTACHMENTS {
+        return false;
+    }
+    let Some(point) = attachment_point(mesh, rest, rest) else {
+        return false;
+    };
+    let fixed = pins
+        .iter()
+        .filter(|p| (!p.attachment || p.kind != PinKind::Position) && p.kind.moves())
+        .filter_map(|p| nearest(&mesh.verts, p.rest))
+        .collect::<Vec<_>>();
+    let existing =
+        pins.iter().filter(|p| p.attachment && p.kind == PinKind::Position).filter_map(|p| attachment_point(mesh, p.rest, p.position)).collect::<Vec<_>>();
+    arap::independent_point(&fixed, &existing, &point)
+}
+
 /// Solve the deformation of `mesh` for `pins` (layer space). Returns deformed vertices.
 pub fn solve(mesh: &Mesh, pins: &[Pin], refine: usize) -> Vec<[f64; 2]> {
     let mut h = arap::Handles::default();
@@ -329,11 +375,11 @@ pub fn solve(mesh: &Mesh, pins: &[Pin], refine: usize) -> Vec<[f64; 2]> {
         }
     }
     let mut used = std::collections::HashSet::new();
-    for p in pins {
+    for p in pins.iter().filter(|p| !p.attachment || p.kind != PinKind::Position) {
         let Some(v) = nearest(&mesh.verts, p.rest) else { continue };
         let r = mesh.verts[v];
         if p.kind.moves() && used.insert(v) {
-            h.fixed.push((v, [p.position[0] + r[0] - p.rest[0], p.position[1] + r[1] - p.rest[1]]));
+            h.fixed.push((v, [r[0] + (p.position[0] - p.rest[0]), r[1] + (p.position[1] - p.rest[1])]));
         }
         if matches!(p.kind, PinKind::Advanced | PinKind::Bend) {
             let (s, c) = p.rotation.to_radians().sin_cos();
@@ -344,11 +390,40 @@ pub fn solve(mesh: &Mesh, pins: &[Pin], refine: usize) -> Vec<[f64; 2]> {
             }
         }
     }
-    if h.fixed.is_empty() && h.edges.is_empty() {
+    if h.fixed.is_empty() && h.edges.is_empty() && !pins.iter().any(|p| p.attachment && p.kind == PinKind::Position) {
         return mesh.verts.clone();
     }
     let w = starch_weights(mesh, pins);
-    arap::deform(&mesh.verts, &mesh.tris, &w, &h, refine)
+    let mut pose = arap::deform(&mesh.verts, &mesh.tris, &w, &h, refine);
+    for p in pins.iter().filter(|p| p.attachment && p.kind == PinKind::Position).take(MAX_ATTACHMENTS) {
+        let Some(mut target) = attachment_point(mesh, p.rest, p.position) else { continue };
+        let desired = target.position;
+        target.position = [0, 1].map(|c| target.vertices.iter().zip(target.weights).map(|(i, weight)| pose[*i][c] * weight).sum());
+        let neutral = target.position;
+        h.points.push(target);
+        // Redundant constraints must not restart the finite refinement solve. This also
+        // avoids both extra solves while a pin follows the previous pose exactly.
+        if (0..2).all(|c| (desired[c] - neutral[c]).abs() <= 32.0 * f64::EPSILON * desired[c].abs().max(neutral[c].abs()).max(1.0)) {
+            continue;
+        }
+        let base = arap::deform(&mesh.verts, &mesh.tris, &w, &h, refine);
+        let Some(point) = h.points.last_mut() else { continue };
+        point.position = desired;
+        let moved = arap::deform(&mesh.verts, &mesh.tris, &w, &h, refine);
+        let finite = pose.iter().zip(&moved).zip(&base).all(|((point, actual), neutral)| (0..2).all(|c| (point[c] + (actual[c] - neutral[c])).is_finite()));
+        if !finite {
+            if let Some(point) = h.points.last_mut() {
+                point.position = neutral;
+            }
+            continue;
+        }
+        for ((point, actual), neutral) in pose.iter_mut().zip(moved).zip(base) {
+            for c in 0..2 {
+                point[c] += actual[c] - neutral[c];
+            }
+        }
+    }
+    pose
 }
 
 /// Per-triangle depth from Overlap pins (higher draws in front).
@@ -367,6 +442,17 @@ pub fn depths(mesh: &Mesh, pins: &[Pin]) -> Vec<f64> {
             d.unwrap_or(0.0)
         })
         .collect()
+}
+
+/// Whether a point is covered by the deformed mesh, including triangles whose winding
+/// flipped during a fold. Degenerate triangles have no coverage.
+pub fn contains(mesh: &Mesh, deformed: &[[f64; 2]], p: [f64; 2]) -> bool {
+    mesh.tris.iter().any(|triangle| {
+        let (Some(a), Some(b), Some(c)) = (deformed.get(triangle[0]), deformed.get(triangle[1]), deformed.get(triangle[2])) else {
+            return false;
+        };
+        bary(*a, *b, *c, p).is_some_and(|weights| weights.iter().all(|weight| *weight >= -1e-9))
+    })
 }
 
 /// Map a point of the deformed mesh back to rest space (barycentric through the triangle that
@@ -439,16 +525,16 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
             y1 = y1.max(p[1]);
         }
     }
-    let ox = x0.floor() as i64 - 1;
-    let oy = y0.floor() as i64 - 1;
-    let w = ((x1.ceil() as i64 + 1 - ox).max(1) as u32).min(16384);
-    let h = ((y1.ceil() as i64 + 1 - oy).max(1) as u32).min(16384);
+    let ox = x0.floor() - 1.0;
+    let oy = y0.floor() - 1.0;
+    let w = (x1.ceil() + 1.0 - ox).clamp(1.0, 16384.0) as u32;
+    let h = (y1.ceil() + 1.0 - oy).clamp(1.0, 16384.0) as u32;
     let mut out = Image::new(w, h);
     // Triangle y-ranges for row bucketing.
     let ranges: Vec<(f64, f64)> = tris.iter().map(|(_, d, _)| (d[0][1].min(d[1][1]).min(d[2][1]), d[0][1].max(d[1][1]).max(d[2][1]))).collect();
     const SUB: [[f64; 2]; 4] = [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
     out.rows_mut().for_each(|(row, line)| {
-        let y = (oy + row as i64) as f64;
+        let y = oy + row as f64;
         let n = line.len();
         let mut cover = vec![0u8; n];
         let mut center: Vec<Option<usize>> = vec![None; n];
@@ -458,10 +544,10 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
             if yb < y || ya > y + 1.0 {
                 continue;
             }
-            let xa = (d[0][0].min(d[1][0]).min(d[2][0]).floor() as i64 - ox).max(0) as usize;
-            let xb = ((d[0][0].max(d[1][0]).max(d[2][0]).ceil() as i64 - ox + 1).max(0) as usize).min(n);
+            let xa = (d[0][0].min(d[1][0]).min(d[2][0]).floor() - ox).clamp(0.0, n as f64) as usize;
+            let xb = (d[0][0].max(d[1][0]).max(d[2][0]).ceil() - ox + 1.0).clamp(0.0, n as f64) as usize;
             for (i, ((cv, ce), an)) in cover.iter_mut().zip(center.iter_mut()).zip(any.iter_mut()).enumerate().take(xb).skip(xa) {
-                let x = (ox + i as i64) as f64;
+                let x = ox + i as f64;
                 for (s, o) in SUB.iter().enumerate() {
                     if let Some(l) = bary(d[0], d[1], d[2], [x + o[0], y + o[1]])
                         && l.iter().all(|v| *v >= -1e-9)
@@ -484,7 +570,7 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
                 continue;
             }
             let (r, d, _) = &tris[k];
-            let p = [(ox + i as i64) as f64 + 0.5, y + 0.5];
+            let p = [ox + i as f64 + 0.5, y + 0.5];
             let Some(l) = bary(d[0], d[1], d[2], p) else { continue };
             let src = [l[0] * r[0][0] + l[1] * r[1][0] + l[2] * r[2][0], l[0] * r[0][1] + l[1] * r[1][1] + l[2] * r[2][1]];
             let s = buf.img.sample_bilinear(src[0], src[1]);
@@ -492,7 +578,7 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
             *px = [s[0] * cov, s[1] * cov, s[2] * cov, s[3] * cov];
         }
     });
-    Buf { img: out, offset: [buf.offset[0] - ox as f64, buf.offset[1] - oy as f64], scale: buf.scale }
+    Buf { img: out, offset: [buf.offset[0] - ox, buf.offset[1] - oy], scale: buf.scale }
 }
 
 /// Count of nodes in a group tree (for tests and readouts).

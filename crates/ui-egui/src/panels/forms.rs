@@ -79,6 +79,56 @@ pub struct Form {
 }
 
 impl Form {
+    /// Fit the Grid's labels and extended combo text; the shared modal clamps to the viewport.
+    fn preferred_width(&self, ctx: &egui::Context) -> f32 {
+        let style = ctx.style_of(ctx.theme());
+        let label_font = egui::TextStyle::Body.resolve(&style);
+        let button_font = egui::TextStyle::Button.resolve(&style);
+        let decoration = style.spacing.icon_spacing + style.spacing.icon_width + 2.0 * style.spacing.button_padding.x;
+        let (label, control) = ctx.fonts_mut(|fonts| {
+            let mut label = 0.0_f32;
+            let mut control = 240.0_f32;
+            for field in &self.fields {
+                label = label.max(fonts.layout_no_wrap(field.label.clone(), label_font.clone(), Color32::WHITE).size().x);
+                if let FieldKind::Choice { options, .. } = &field.kind {
+                    // ComboBox width is a minimum in a Grid. Measure all choices to keep
+                    // the modal steady when its selection changes.
+                    for (text, _) in options {
+                        control = control.max(fonts.layout_no_wrap(text.clone(), button_font.clone(), Color32::WHITE).size().x + decoration);
+                    }
+                }
+            }
+            (label, control)
+        });
+        // 14 px matches the Grid spacing; the shared modal reserves 18 px per side.
+        (label + control + 14.0 + 36.0).max(440.0)
+    }
+
+    fn choice_value(&self, key: &str) -> Option<&str> {
+        let FieldKind::Choice { options, sel } = &self.fields.iter().find(|field| field.key == key)?.kind else { return None };
+        options.get(*sel)?.1.as_str()
+    }
+
+    /// Match the engine command's defaults when switching to the built-in OCIO config.
+    /// Update the visible choices together so the complete form remains valid on submission.
+    fn sync_color_engine(&mut self, previous: Option<&str>) {
+        if self.command != "file.projectSettings" || previous == Some("ocio") || self.choice_value("colorEngine") != Some("ocio") {
+            return;
+        }
+        for field in &mut self.fields {
+            let FieldKind::Choice { options, sel } = &mut field.kind else { continue };
+            let current = options.get(*sel).and_then(|option| option.1.as_str());
+            let target = match field.key.as_str() {
+                "workingSpace" if !current.and_then(effectcraft_engine::project::ColorSpace::parse).is_some_and(|space| space.is_linear()) => "acescg",
+                "hdr" if current == Some("clip") => "toneMap",
+                _ => continue,
+            };
+            if let Some(index) = options.iter().position(|option| option.1.as_str() == Some(target)) {
+                *sel = index;
+            }
+        }
+    }
+
     /// The command parameters: `base` plus every field.
     pub fn params(&self) -> Value {
         let mut m: Map<String, Value> = self.base.as_object().cloned().unwrap_or_default();
@@ -667,11 +717,12 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
 
 pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut f = app.dialog_state.form.clone();
+    let previous_engine = f.choice_value("colorEngine").map(str::to_owned);
     let (mut ok, mut close) = (false, false);
     let h = 120.0 + f.fields.len() as f32 * 30.0;
     let mut regs: Vec<(String, egui::Rect, String)> = vec![];
     let mut browse: Option<usize> = None;
-    super::dialogs::modal(ctx, &f.title.clone(), vec2(440.0, h), t, |ui| {
+    super::dialogs::modal(ctx, &f.title.clone(), vec2(f.preferred_width(ctx), h), t, |ui| {
         egui::Grid::new("form-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
             for (i, fl) in f.fields.iter_mut().enumerate() {
                 ui.label(&fl.label);
@@ -739,6 +790,7 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
         });
     });
+    f.sync_color_engine(previous_engine.as_deref());
     for (id, r, l) in regs {
         app.auto.add(&id, r, &l);
     }
@@ -755,13 +807,16 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             None => app.ui.status = "no file dialog available: type the path".into(),
         }
     }
+    let format = f.params().get("format").and_then(Value::as_str).map(str::to_string);
     if let Some(i) = browse
         && let Some(FieldKind::SavePath(value)) = f.fields.get_mut(i).map(|f| &mut f.kind)
     {
-        let default = std::path::Path::new(value.as_str()).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        match app.hooks.pick_save.as_ref() {
+        let path = std::path::Path::new(value.as_str());
+        let ext = format.as_deref().or_else(|| path.extension().and_then(|e| e.to_str())).unwrap_or("");
+        let default = path.with_extension(ext).to_string_lossy().to_string();
+        match app.hooks.pick_save_file.as_ref() {
             Some(pick) => {
-                if let Some(path) = pick(&default) {
+                if let Some(path) = pick(&default, ext) {
                     *value = path;
                 }
             }
@@ -783,6 +838,11 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     }
 }
 
+/// Close the information dialog without abandoning a pending Settings transaction.
+pub(crate) fn close_info(app: &mut EffectcraftApp) {
+    app.dialog = app.dialog_state.prefs_snapshot.is_some().then_some(Dialog::Settings);
+}
+
 pub fn show_info(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let (title, body) = app.dialog_state.info.clone();
     let mut close = false;
@@ -796,7 +856,7 @@ pub fn show_info(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         });
     });
     if close {
-        app.dialog = None;
+        close_info(app);
     }
 }
 

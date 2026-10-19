@@ -146,7 +146,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                     let (hv, show) = if speed { (e.speed.abs(), true) } else { (k.value.components().get(d).copied().unwrap_or(0.0) + e.speed * dt, !spatial) };
                     let bezier = if out_side { k.out_interp == Interp::Bezier } else { k.in_interp == Interp::Bezier };
                     if ks && show && (bezier || speed) {
-                        handles.push(Handle { out: out_side, t: kt + dt, v: hv, speed: e.speed, dur });
+                        handles.push(Handle { out: out_side, t: kt + dt * l.stretch / 100.0, v: hv, speed: e.speed, dur });
                     }
                 }
                 let v = if speed {
@@ -185,7 +185,17 @@ fn text_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, x
 }
 
 /// Draw the Graph Editor into `area` (the right side of the Timeline) and queue edits.
-pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: &Comp, ectx: &EvalCtx, tm: TMap, area: Rect, actions: &mut Actions) {
+pub(crate) fn show(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    p: &egui::Painter,
+    comp: &Comp,
+    ectx: &EvalCtx,
+    tm: TMap,
+    area: Rect,
+    middle: egui::Vec2,
+    actions: &mut Actions,
+) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let footer_h = 28.0;
@@ -225,9 +235,16 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     let auto = (lo - pad, hi + pad);
     // While a key or handle is being dragged the scale stays put (no feedback loop).
     let drag_id = egui::Id::new("graph-dragging");
-    let dragging = ctx.data(|d| d.get_temp::<bool>(drag_id)).unwrap_or(false) && ctx.input(|i| i.pointer.any_down());
-    let (lo, hi) = if app.ui.timeline.graph_auto_zoom && !dragging { auto } else { app.ui.timeline.graph_range.unwrap_or(auto) };
+    let dragging = ctx.data(|d| d.get_temp::<bool>(drag_id)).unwrap_or(false) && ctx.input(|i| i.pointer.any_down() || i.pointer.primary_released());
+    let (mut lo, mut hi) = if app.ui.timeline.graph_auto_zoom && !dragging { auto } else { app.ui.timeline.graph_range.unwrap_or(auto) };
     if app.ui.timeline.graph_auto_zoom && !dragging {
+        app.ui.timeline.graph_range = Some((lo, hi));
+    }
+    if middle.y != 0.0 && ui.input(|i| i.pointer.press_origin()).is_some_and(|p| plot.contains(p)) {
+        let delta = middle.y as f64 * (hi - lo) / plot.height().max(1.0) as f64;
+        lo += delta;
+        hi += delta;
+        app.ui.timeline.graph_auto_zoom = false;
         app.ui.timeline.graph_range = Some((lo, hi));
     }
     let ymap = |v: f64| plot.max.y - ((v - lo) / (hi - lo)) as f32 * plot.height();
@@ -306,11 +323,12 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 let hr = Rect::from_center_size(hp, vec2(10.0, 10.0));
                 let hresp = ui.interact(hr, egui::Id::new(("ghandle", uid, d, k.idx, side)), Sense::drag());
                 app.auto.add(&format!("timeline.graph.handle.{uid}.{d}.{}.{side}", k.idx), hr, "Bezier handle");
-                if hresp.dragged()
+                if !c.layer.switches.locked
+                    && hresp.dragged()
                     && let Some(pt) = hresp.interact_pointer_pos()
                 {
                     ctx.data_mut(|dd| dd.insert_temp(drag_id, true));
-                    let mut dt = (tm.t(pt.x) - k.t) * if h.out { 1.0 } else { -1.0 };
+                    let mut dt = (c.layer.layer_time(Tick::from_seconds_f64(tm.t(pt.x))).seconds() - k.time.seconds()) * if h.out { 1.0 } else { -1.0 };
                     dt = dt.max(h.dur * 0.001);
                     let influence = (dt / h.dur.max(1e-9) * 100.0).clamp(0.1, 100.0);
                     let sp = if speed {
@@ -320,11 +338,33 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                         let dv = vmap(pt.y) - k.v;
                         dv / dt * if h.out { 1.0 } else { -1.0 }
                     };
-                    let mut params = json!({"layer": lid.0, "prop": uid, "time": k.time.seconds(), "side": side, "speed": sp, "influence": influence, "merge": format!("ghandle-{uid}-{}", k.idx)});
-                    if c.editable {
-                        params["dim"] = json!(d);
+                    let mut targets = vec![];
+                    for curve in cs.iter().filter(|curve| curve.dim == d && !curve.layer.switches.locked) {
+                        for selected in curve.keys.iter().filter(|key| key.sel) {
+                            // Match the dragged side; an endpoint has only its inward-facing side.
+                            // Selected linear keys gain a Bezier handle as part of the group edit.
+                            let target_out = if h.out { selected.idx + 1 < curve.prop.keys.len() } else { selected.idx == 0 };
+                            let spatial = curve.prop.spatial && matches!(curve.prop.value, Value::Vec2(_) | Value::Vec3(_));
+                            let Some(ease) = side_ease(&curve.prop.keys, selected.idx, if spatial { 0 } else { d }, curve.prop.spatial, target_out) else {
+                                continue;
+                            };
+                            let target_speed = if speed && ease.speed < 0.0 {
+                                -sp.abs()
+                            } else if speed {
+                                sp.abs()
+                            } else {
+                                sp
+                            };
+                            let mut target = json!({"layer": curve.layer.id.0, "prop": curve.prop.uid, "time": selected.time.seconds(), "side": if target_out { "out" } else { "in" }, "speed": target_speed, "influence": influence});
+                            if curve.editable {
+                                target["dim"] = json!(d);
+                            }
+                            targets.push(target);
+                        }
                     }
-                    actions.push(("keys.setEase".into(), params));
+                    if !targets.is_empty() {
+                        actions.push(("keys.setEase".into(), json!({"keys": targets, "merge": format!("ghandle-{uid}-{}", k.idx)})));
+                    }
                 }
                 if hresp.drag_stopped() {
                     ctx.data_mut(|dd| dd.insert_temp(drag_id, false));
@@ -338,6 +378,10 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
             let kr = Rect::from_center_size(kp, vec2(11.0, 11.0));
             let kresp = ui.interact(kr, egui::Id::new(("gkey", uid, d, k.idx)), Sense::click_and_drag());
             app.auto.add(&format!("timeline.graph.key.{uid}.{d}.{}", k.idx), kr, &c.prop.name);
+            // Keep the hit registered so a locked key cannot start the transform box behind it.
+            if c.layer.switches.locked {
+                continue;
+            }
             let mods = ui.input(|i| i.modifiers);
             let key = &c.prop.keys[k.idx];
             if kresp.clicked() && mods.command {
@@ -360,29 +404,48 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
             if kresp.drag_started()
                 && let Some(o) = ui.input(|i| i.pointer.press_origin())
             {
-                ctx.data_mut(|dd| dd.insert_temp(key_grab_id(), KeyGrab { press: o, t: k.t }));
+                ctx.data_mut(|dd| {
+                    dd.insert_temp(
+                        key_grab_id(),
+                        KeyGrab { owner: c.layer.id, press: o, t: k.t, stagger: mods.command && mods.alt, uid, idx: k.idx, dim: d, editable: c.editable },
+                    )
+                });
             }
-            if kresp.dragged()
-                && let Some(pt) = kresp.interact_pointer_pos()
-                && let Some(g) = ctx.data(|dd| dd.get_temp::<KeyGrab>(key_grab_id()))
-            {
-                ctx.data_mut(|dd| dd.insert_temp(drag_id, true));
-                let (dx, dy) = (pt.x - g.press.x, pt.y - g.press.y);
-                let (time_ok, value_ok) = if mods.shift { (dx.abs() >= dy.abs(), dy.abs() > dx.abs()) } else { (true, true) };
-                // Graph Editor ▸ Snap: to the current time and other keys.
-                let others: Vec<f64> = all_key_times.iter().filter(|(u, i, _)| !(*u == uid && *i == k.idx)).map(|x| x.2).collect();
-                let t = if time_ok { super::graph_tools::snap_time(app, tm, (g.t + (tm.t(pt.x) - tm.t(g.press.x))).max(0.0), &others) } else { g.t };
-                let mut params = json!({"timeOffset": t - g.t, "merge": "graph-key", "fromStart": true});
-                if value_ok && !speed && c.editable {
-                    params["valueOffset"] = json!(vmap(pt.y) - vmap(g.press.y));
-                    params["dim"] = json!(d);
-                }
-                actions.push(("keys.transform".into(), params));
+        }
+    }
+
+    // Keep the gesture independent of the grabbed widget: collisions can temporarily remove
+    // its key index, and a later fromStart transform must still restore the original keys.
+    if let Some(g) = ctx.data(|dd| dd.get_temp::<KeyGrab>(key_grab_id())) {
+        let (down, released, pt, mods) = ui.input(|i| (i.pointer.primary_down(), i.pointer.primary_released(), i.pointer.latest_pos(), i.modifiers));
+        let owner_editable = comp.layer(g.owner).is_some_and(|layer| !layer.switches.locked);
+        if owner_editable
+            && (down || released)
+            && let Some(pt) = pt
+        {
+            ctx.data_mut(|dd| dd.insert_temp(drag_id, true));
+            let (dx, dy) = (pt.x - g.press.x, pt.y - g.press.y);
+            let (time_ok, value_ok) = if mods.shift { (dx.abs() >= dy.abs(), dy.abs() > dx.abs()) } else { (true, true) };
+            // Graph Editor ▸ Snap: to the current time and other keys.
+            let others: Vec<f64> = all_key_times.iter().filter(|(u, i, _)| !(*u == g.uid && *i == g.idx)).map(|x| x.2).collect();
+            let t = if time_ok { super::graph_tools::snap_time(app, tm, (g.t + (tm.t(pt.x) - tm.t(g.press.x))).max(0.0), &others) } else { g.t };
+            let mut params = if g.stagger {
+                json!({"stagger": tm.t(pt.x) - tm.t(g.press.x), "merge": "graph-key-stagger", "fromStart": true})
+            } else {
+                json!({"timeOffset": t - g.t, "merge": "graph-key", "fromStart": true})
+            };
+            if !g.stagger && value_ok && !speed && g.editable {
+                params["valueOffset"] = json!(vmap(pt.y) - vmap(g.press.y));
+                params["dim"] = json!(g.dim);
             }
-            if kresp.drag_stopped() {
-                ctx.data_mut(|dd| dd.insert_temp(drag_id, false));
-                actions.push(("__endMerge".into(), json!({})));
-            }
+            actions.push(("keys.transform".into(), params));
+        }
+        if !down || !owner_editable {
+            ctx.data_mut(|dd| {
+                dd.remove::<KeyGrab>(key_grab_id());
+                dd.insert_temp(drag_id, false);
+            });
+            actions.push(("__endMerge".into(), json!({})));
         }
     }
 
@@ -551,8 +614,14 @@ fn fmt(v: f64, step: f64) -> String {
 /// A Graph Editor key drag: where the button went down and the grabbed key's comp time then.
 #[derive(Clone, Copy, Debug)]
 struct KeyGrab {
+    owner: LayerId,
     press: Pos2,
     t: f64,
+    stagger: bool,
+    uid: u64,
+    idx: usize,
+    dim: usize,
+    editable: bool,
 }
 
 fn key_grab_id() -> egui::Id {

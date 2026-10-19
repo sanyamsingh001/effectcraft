@@ -2,6 +2,8 @@
 //! (scale / move selected keys in time and value; Alt-drag of a key group in the timeline) and
 //! spatial Bezier tangents dragged on a motion path.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+
 use effectcraft_keyframe::Keyframe;
 use effectcraft_project::{LayerId, Uid};
 use effectcraft_time::Tick;
@@ -40,6 +42,8 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
     let fr = comp.frame_rate;
     let ts = f_p(p, "timeScale").unwrap_or(1.0);
     let toff = f_p(p, "timeOffset").unwrap_or(0.0);
+    // Each successive selected key receives one more interval; the first stays anchored.
+    let stagger = f_p(p, "stagger").unwrap_or(0.0);
     let vs = f_p(p, "valueScale").unwrap_or(1.0);
     let voff = f_p(p, "valueOffset").unwrap_or(0.0);
     let va = f_p(p, "valueAnchor").unwrap_or(0.0);
@@ -55,8 +59,9 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
     // Default time anchor: the earliest selected key (comp time).
     let first = sel.iter().filter_map(|k| comp.layer(k.layer).map(|l| l.comp_time(k.time))).min().unwrap_or(Tick::ZERO);
     let ta = f_p(p, "timeAnchor").map(Tick::from_seconds_f64).unwrap_or(first);
-    let map_t = |ct: Tick| -> Tick {
-        let x = ta.seconds() + (ct.seconds() - ta.seconds()) * ts + toff;
+    let ranks: HashMap<KeyRef, usize> = sel.iter().copied().enumerate().map(|(i, k)| (k, i)).collect();
+    let map_t = |ct: Tick, rank: usize| -> Tick {
+        let x = ta.seconds() + (ct.seconds() - ta.seconds()) * ts + toff + stagger * rank as f64;
         fr.snap_nearest(Tick::from_seconds_f64(x.max(0.0)))
     };
     let touch_values = vs != 1.0 || voff != 0.0;
@@ -65,13 +70,20 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
             *proj = (*b).clone();
         }
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        let mut groups: std::collections::BTreeMap<(LayerId, Uid), Vec<Tick>> = Default::default();
+        let mut groups: BTreeMap<(LayerId, Uid), Vec<Tick>> = Default::default();
         for k in &sel {
             groups.entry((k.layer, k.prop)).or_default().push(k.time);
         }
-        let mut new_sel = vec![];
+        let mut mapped: HashMap<KeyRef, KeyRef> = HashMap::new();
         for ((lid, uid), times) in groups {
             let Some(layer) = comp.layer_mut(lid) else { continue };
+            if layer.switches.locked {
+                for time in times {
+                    let key = KeyRef { layer: lid, prop: uid, time };
+                    mapped.insert(key, key);
+                }
+                continue;
+            }
             let (start, stretch) = (layer.start_time, layer.stretch);
             let to_comp = |lt: Tick| if (stretch - 100.0).abs() < 1e-9 { start + lt } else { start + Tick((lt.0 as f64 * stretch / 100.0) as i64) };
             let to_layer = |ct: Tick| {
@@ -80,8 +92,11 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
             };
             let Some(pr) = layer.props.find_mut(uid) else { continue };
             let (mut moved, mut kept): (Vec<Keyframe>, Vec<Keyframe>) = pr.keys.drain(..).partition(|k| times.contains(&k.time));
+            let mut changes = Vec::with_capacity(moved.len());
             for k in &mut moved {
-                k.time = to_layer(map_t(to_comp(k.time)));
+                let old = KeyRef { layer: lid, prop: uid, time: k.time };
+                k.time = to_layer(map_t(to_comp(k.time), ranks.get(&old).copied().unwrap_or(0)));
+                changes.push((old, k.time));
                 if touch_values {
                     let mut c = k.value.components();
                     for (d, v) in c.iter_mut().enumerate() {
@@ -96,13 +111,27 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
             kept.retain(|k| !moved.iter().any(|m| m.time == k.time));
             moved.sort_by_key(|k| k.time);
             moved.dedup_by_key(|k| k.time);
-            for k in &moved {
-                new_sel.push(KeyRef { layer: lid, prop: uid, time: k.time });
-            }
             kept.extend(moved);
             kept.sort_by_key(|k| k.time);
             pr.keys = kept;
+            let indices: Vec<_> =
+                changes.into_iter().filter_map(|(old, time)| pr.keys.binary_search_by_key(&time, |k| k.time).ok().map(|i| (old, i))).collect();
             effectcraft_keyframe::retime_roving(&mut pr.keys, pr.spatial);
+            for (old, i) in indices {
+                if let Some(k) = pr.keys.get(i) {
+                    mapped.insert(old, KeyRef { layer: lid, prop: uid, time: k.time });
+                }
+            }
+        }
+        // Grouping and chronological sorting must not change the user's selection order.
+        let mut new_sel = Vec::with_capacity(sel.len());
+        let mut seen = HashSet::with_capacity(sel.len());
+        for old in &sel {
+            if let Some(new) = mapped.get(old).copied()
+                && seen.insert(new)
+            {
+                new_sel.push(new);
+            }
         }
         st.selected_keys = new_sel;
         Ok(json!({"keys": st.selected_keys.len()}))
@@ -120,16 +149,16 @@ fn spatial_tangents(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("keys.setSpatialTangents", "pass `in` and/or `out` [dx, dy, dz?]"));
     }
     let brk = b_p(p, "break").unwrap_or(false);
-    s.edit("Edit Spatial Tangents", merge_p(p), |proj, _| {
+    s.edit("Edit Spatial Tangents", merge_p(p), |proj, st| {
         let l = super::layer_mut(proj, cid, lid)?;
         let pr = l.props.find_mut(uid).ok_or_else(|| bad("keys.setSpatialTangents", "no property"))?;
         if !pr.spatial {
             return Err(bad("keys.setSpatialTangents", "not a spatial property"));
         }
-        let i = pr.keys.iter().position(|k| k.time == t).or_else(|| pr.keys.iter().enumerate().min_by_key(|(_, k)| (k.time.0 - t.0).abs()).map(|(i, _)| i));
+        let i = pr.keys.iter().position(|k| k.time == t).or_else(|| pr.keys.iter().enumerate().min_by_key(|(_, k)| k.time.0.abs_diff(t.0)).map(|(i, _)| i));
         let i = i.ok_or_else(|| bad("keys.setSpatialTangents", "the property has no keyframes"))?;
         let (cur_in, cur_out) = effectcraft_keyframe::spatial_tangents(&pr.keys, i);
-        let k = &mut pr.keys[i];
+        let k = pr.keys.get_mut(i).ok_or_else(|| bad("keys.setSpatialTangents", "the key no longer exists"))?;
         let neg = |v: [f64; 3]| [-v[0], -v[1], -v[2]];
         let (ni, no) = match (tin, tout) {
             (Some(a), Some(b)) => (a, b),
@@ -141,7 +170,17 @@ fn spatial_tangents(s: &mut Session, p: &Value) -> Result<Value> {
         k.spatial_continuous = !brk && tin.is_some() != tout.is_some();
         k.spatial_in = ni;
         k.spatial_out = no;
+        let before: Vec<Tick> = pr.keys.iter().map(|key| key.time).collect();
         effectcraft_keyframe::retime_roving(&mut pr.keys, true);
+        let mut seen = HashSet::new();
+        st.selected_keys.retain_mut(|selected| {
+            if selected.layer != lid || selected.prop != uid {
+                return true;
+            }
+            let Some(key) = before.binary_search(&selected.time).ok().and_then(|i| pr.keys.get(i)) else { return false };
+            selected.time = key.time;
+            seen.insert(*selected)
+        });
         Ok(json!({"in": ni, "out": no}))
     })
 }
@@ -153,7 +192,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Transform Keyframes",
             [],
             None,
-            "{timeScale?, timeAnchor? (comp s), timeOffset? (s), valueScale?, valueAnchor?, valueOffset?, dim? | dims?: [d…], merge?, fromStart?: bool (with merge: values are the whole transform since the drag started)}",
+            "{timeScale?, timeAnchor? (comp s), timeOffset? (s), stagger? (comp s per selection index, first key anchored), valueScale?, valueAnchor?, valueOffset?, dim? | dims?: [d…], merge?, fromStart?: bool (with merge: values are the whole transform since the drag started)}",
             has_keys,
             transform
         ),

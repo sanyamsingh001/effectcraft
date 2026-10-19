@@ -3,14 +3,24 @@
 //! Insert Edit — that cut the marked range into the active composition at its current time.
 //! Everything runs `footage.*` commands (state in `EditorState::footage_panel`).
 
-use effectcraft_engine::project::{FootageKind, ItemKind};
-use effectcraft_engine::time::Tick;
+use effectcraft_engine::project::{FootageKind, ItemId, ItemKind};
+use effectcraft_engine::time::{FrameRate, Tick};
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 
 use super::panel_kit as kit;
 use crate::EffectcraftApp;
 use crate::theme::Tokens;
+
+#[derive(Clone)]
+struct PlaybackClock {
+    item: ItemId,
+    duration: Tick,
+    rate: FrameRate,
+    phase: Tick,
+    displayed: Tick,
+    updated_at: f64,
+}
 
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
@@ -31,6 +41,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         _ => None,
     };
     let (dur, fr) = match &footage {
+        Some(f) if f.kind == FootageKind::Sequence => (item.source_span().map_or(Tick::from_seconds_f64(10.0), |(duration, _)| duration), f.frame_rate),
         Some(f) if f.kind != FootageKind::Still && f.duration > Tick::ZERO => (f.duration, f.frame_rate),
         Some(f) => (Tick::from_seconds_f64(10.0), f.frame_rate),
         None => (Tick::from_seconds_f64(10.0), effectcraft_engine::time::FrameRate::FPS_30),
@@ -97,17 +108,34 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         && let Some(pt) = resp.interact_pointer_pos()
     {
         let s = ((pt.x - ruler.min.x) / ruler.width()).clamp(0.0, 1.0) as f64 * dur.seconds();
+        ctx.data_mut(|d| d.remove::<PlaybackClock>(egui::Id::new("footage-playing-clock")));
         kit::exec(app, "footage.setTime", json!({"time": s}));
     }
     // Playback.
     let play_id = egui::Id::new("footage-playing");
+    let clock_id = egui::Id::new("footage-playing-clock");
     let playing: bool = ctx.data(|d| d.get_temp(play_id).unwrap_or(false));
+    let now = ctx.input(|i| i.time);
+    let current = app.session.state.footage_panel.as_ref().map_or(view.time, |v| v.time);
     if playing {
-        let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
-        let next = view.time.seconds() + dt;
-        let next = if next >= dur.seconds() - fr.frame_duration().seconds() { 0.0 } else { next };
-        let _ = app.session.execute("footage.setTime", json!({"time": next}));
+        let stored: Option<PlaybackClock> = ctx.data(|d| d.get_temp(clock_id));
+        let mut clock = match stored {
+            Some(mut clock) if clock.item == view.item && clock.duration == dur && clock.rate == fr && clock.displayed == current => {
+                // Keep the fractional phase between frames. Input time also prevents a second
+                // egui layout pass from advancing playback twice in the same display update.
+                let elapsed = Tick::from_seconds_f64((now - clock.updated_at).clamp(0.0, 0.1));
+                clock.phase = Tick((clock.phase + elapsed).0.rem_euclid(dur.0.max(1)));
+                clock.updated_at = now;
+                clock
+            }
+            _ => PlaybackClock { item: view.item, duration: dur, rate: fr, phase: current, displayed: current, updated_at: now },
+        };
+        let _ = app.session.execute("footage.setTime", json!({"frame": fr.frame_at(clock.phase).max(0)}));
+        clock.displayed = app.session.state.footage_panel.as_ref().map_or(current, |v| v.time);
+        ctx.data_mut(|d| d.insert_temp(clock_id, clock));
         ctx.request_repaint();
+    } else {
+        ctx.data_mut(|d| d.remove::<PlaybackClock>(clock_id));
     }
     // Controls.
     let y = bar.min.y + 5.0;
@@ -121,7 +149,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     );
     x += 92.0;
     if kit::button(app, ui, Rect::from_min_size(pos2(x, y), vec2(54.0, 20.0)), "footage.play", if playing { "Pause" } else { "Play" }, false) {
-        ctx.data_mut(|d| d.insert_temp(play_id, !playing));
+        ctx.data_mut(|d| {
+            d.insert_temp(play_id, !playing);
+            if playing {
+                d.remove::<PlaybackClock>(clock_id);
+            } else {
+                d.insert_temp(clock_id, PlaybackClock { item: view.item, duration: dur, rate: fr, phase: current, displayed: current, updated_at: now });
+            }
+        });
     }
     x += 60.0;
     if kit::button(app, ui, Rect::from_min_size(pos2(x, y), vec2(28.0, 20.0)), "footage.setIn", "{", false) {

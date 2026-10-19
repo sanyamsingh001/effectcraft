@@ -17,6 +17,7 @@
 
 mod convert;
 pub mod exr_channels;
+mod exr_color;
 mod layered;
 pub use layered::vector_doc;
 mod pool;

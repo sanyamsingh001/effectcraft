@@ -447,13 +447,9 @@ fn value(s: &Session, a: &J) -> R {
     let p = l.props.find(uid).ok_or("the property no longer exists (it was deleted)")?;
     let t = f(a, "time").map(Tick::from_seconds_f64).unwrap_or_else(|| s.time_of(cid));
     let pre = a.get("pre").and_then(J::as_bool).unwrap_or(false);
-    let v = if pre || !p.has_expression() {
-        p.value_at(l.layer_time(t))
-    } else {
-        let mut ctx = EvalCtx::new(&s.project, cid, c, t);
-        ctx.expr = s.expr.as_deref();
-        ctx.value(l, p)
-    };
+    let mut ctx = EvalCtx::new(&s.project, cid, c, t);
+    ctx.expr = s.expr.as_deref();
+    let v = if pre { ctx.keyframed_value(l, p, l.layer_time(t)) } else { ctx.value(l, p) };
     Ok(js_value(c, &v))
 }
 

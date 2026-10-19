@@ -323,6 +323,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let footer_h = 28.0;
     let list = Rect::from_min_max(pos2(rect.min.x, hdr.max.y), pos2(rect.max.x, rect.max.y - footer_h));
     let lp = p.with_clip_rect(list);
+    let middle = widgets::middle_drag(ui, egui::Id::new("project-middle-drag"), list);
+    app.ui.project_hscroll = (app.ui.project_hscroll - middle.x).clamp(0.0, overflow);
+    app.ui.project_scroll -= middle.y;
     // The list's empty area (under the rows and the scroll bar, which take their own clicks):
     // a click deselects, a drag draws a selection box, a double-click imports, as in After
     // Effects (File ▸ Import ▸ File...).
@@ -488,9 +491,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if sresp.clicked() {
             widgets::open_popup(ui, pop);
         }
-        let names: Vec<String> = effectcraft_engine::color::Label::ALL.iter().map(|l| app.session.prefs.label_name(*l)).collect();
+        let labels: Vec<_> = effectcraft_engine::color::Label::ALL.iter().map(|l| (app.session.prefs.label_name(*l), t.label(*l))).collect();
         let cur = effectcraft_engine::color::Label::ALL.iter().position(|l| *l == it.label);
-        if let Some(li) = widgets::popup_menu(ui, pop, sw.left_bottom(), &names, cur) {
+        if let Some(li) = widgets::label_popup_menu(ui, &mut app.auto, pop, sw.left_bottom(), &labels, cur) {
             let items: Vec<u64> = if selected { app.session.state.project_selection.iter().map(|i| i.0).collect() } else { vec![id.0] };
             actions.push(("project.setLabel".into(), json!({"items": items, "label": li})));
         }

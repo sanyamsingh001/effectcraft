@@ -9,7 +9,7 @@
 //! - **Text Animation** (text layers): Add Animator menu.
 
 use effectcraft_engine::keyframe::{Justify, TextDoc, Value};
-use effectcraft_engine::project::{Layer, LayerSource, Property};
+use effectcraft_engine::project::{Layer, LayerSource, ParamUi, Property};
 use effectcraft_engine::render::EvalCtx;
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::json;
@@ -73,7 +73,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // ---------------------------------------------------------------- Layer Transform
     if let Some(tr) = layer.transform().cloned() {
-        section_header(app, ui, &p, x0, w, y, "Layer Transform", "properties.transform");
+        let selected = app.session.state.selected_layers.iter().filter(|id| comp.layer(**id).is_some()).count();
+        let title = if selected > 1 { format!("{selected} Selected Objects") } else { "Layer Transform".into() };
+        section_header(app, ui, &p, x0, w, y, &title, "properties.transform");
         let rr = Rect::from_min_size(pos2(x0 + w - 40.0, y), vec2(40.0, ROW_H));
         let resp = ui.interact(rr, egui::Id::new("props-reset"), Sense::click());
         p.text(rr.right_center(), Align2::RIGHT_CENTER, "Reset", Tokens::ui(12.0), if resp.hovered() { t.accent_hover } else { t.accent });
@@ -85,7 +87,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         y += ROW_H + 2.0;
         for pr in tr.props() {
-            if pr.three_d_only && !layer.is_3d() {
+            if (pr.three_d_only && !layer.is_3d()) || (pr.two_d_only && layer.is_3d()) {
                 continue;
             }
             transform_row(app, ui, &p, &layer, pr, &ectx, Rect::from_min_size(pos2(x0, y), vec2(w, ROW_H)), &mut actions);
@@ -149,6 +151,28 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     y += 40.0;
     scroll.end(ui, &mut app.auto, "properties.scroll", y - top, &t);
     for (id, params) in actions {
+        if matches!(id.as_str(), "prop.toggleAnimation" | "prop.toggleKey") && app.session.state.selected_layers.len() > 1 {
+            let Some(uid) = params.get("prop").and_then(serde_json::Value::as_u64) else { continue };
+            let Some(path) = layer.props.match_path_of(uid) else { continue };
+            let steps: Vec<_> = app
+                .session
+                .state
+                .selected_layers
+                .iter()
+                .filter_map(|selected| {
+                    let counterpart = comp.layer(*selected).filter(|layer| !layer.switches.locked)?;
+                    let property = counterpart.props.prop(&path).filter(|property| !property.static_only)?;
+                    Some(json!({"command": id, "params": {"layer": counterpart.id.0, "prop": property.uid}, "substitute": false}))
+                })
+                .collect();
+            if !steps.is_empty() {
+                let label = if id == "prop.toggleAnimation" { "Toggle Stopwatch" } else { "Add/Remove Keyframe" };
+                if let Err(e) = crate::menus::invoke(app, &ctx, "engine.batch", json!({"steps": steps, "label": label})) {
+                    app.ui.status = e;
+                }
+            }
+            continue;
+        }
         let params = match &text_target {
             Some(tt) if id == "layer.setText" => tt.params(params),
             _ => params,
@@ -188,7 +212,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
         // ◀ ◆ ▶: previous key, add/remove key at the CTI, next key.
         let now = ectx.time;
         let half = ectx.comp.frame_duration().0 / 2;
-        let on_key = pr.keys.iter().any(|k| (layer.comp_time(k.time).0 - now.0).abs() <= half);
+        let on_key = u64::try_from(half).is_ok_and(|half| pr.keys.iter().any(|k| layer.comp_time(k.time).0.abs_diff(now.0) <= half));
         let cells = [("prev", r.min.x + 4.0), ("key", r.min.x + 16.0), ("next", r.min.x + 28.0)];
         for (what, cx) in cells {
             let cr = Rect::from_center_size(pos2(cx, cy), vec2(12.0, 16.0));
@@ -238,7 +262,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let pct = is_scale || pr.name == "Opacity";
     let suffix = if pct { "%" } else { "" };
     match &value {
-        Value::Scalar(v) if pr.name == "Rotation" || pr.name.ends_with(" Rotation") => {
+        Value::Scalar(v) if matches!(pr.ui, ParamUi::Angle) || pr.name == "Rotation" || pr.name.ends_with(" Rotation") => {
             let (_, deg) = super::fx_widgets::split_angle(*v);
             let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::new(("props-v", uid)), *v, decimals(deg), &t);
             app.auto.add(&format!("{base}.value"), dr, &pr.name);
@@ -248,8 +272,12 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
             }
         }
         Value::Scalar(v) => {
-            let range = if pr.name == "Opacity" { (0.0, 100.0) } else { (-1e9, 1e9) };
-            let (vr, nv, _) = widgets::hot_number_at(ui, pos2(vx, cy - 9.0), egui::Id::new(("props-v", uid)), *v, 0.5, range, decimals(*v), suffix, &t);
+            let (range, places) = if let ParamUi::Slider { min, max, decimals, .. } = pr.ui {
+                ((min, max), decimals as usize)
+            } else {
+                (if pr.name == "Opacity" { (0.0, 100.0) } else { (-1e9, 1e9) }, decimals(*v))
+            };
+            let (vr, nv, _) = widgets::hot_number_at(ui, pos2(vx, cy - 9.0), egui::Id::new(("props-v", uid)), *v, 0.5, range, places, suffix, &t);
             app.auto.add(&format!("{base}.value"), vr, &pr.name);
             if let Some(nv) = nv {
                 set(actions, json!(nv));

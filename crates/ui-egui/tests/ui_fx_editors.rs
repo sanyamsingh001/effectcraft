@@ -250,6 +250,82 @@ fn reshape_correspondence_points_on_the_viewer() {
     assert_eq!(h.state().session.history.undo.len(), undo_len + 1);
 }
 
+#[test]
+fn mesh_warp_vertices_tangents_and_keyframes_are_editable() {
+    use effectcraft_engine::effects::WarpMesh;
+    let (s0, layer, fx) = with_effect("Mesh Warp");
+    let mut h = harness(s0);
+    let prop = group(&h, layer, fx).get("mesh").unwrap().uid;
+    let stopwatch = format!("effectControls.prop.{prop}.stopwatch");
+    rect(&h, &stopwatch);
+    click_id(&mut h, &stopwatch);
+    assert!(group(&h, layer, fx).get("mesh").unwrap().is_animated());
+    click_id(&mut h, &format!("effectControls.effect.{fx}.mesh.edit"));
+    h.state_mut().toggle_maximize(PanelKind::EffectControls);
+    h.run_steps(6);
+    let original_position = h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().transform().unwrap().get("position").unwrap().value.clone();
+    let vertex = format!("viewer.mesh.{fx}.vertex.27");
+    let from = rect(&h, &vertex).center();
+    let undo_len = h.state().session.history.undo.len();
+    drag(&mut h, from, from + egui::vec2(36.0, 20.0));
+    let g = group(&h, layer, fx);
+    let key = &g.get("mesh").unwrap().keys[0];
+    let KV::Str(raw) = &key.value else { panic!("expected mesh data") };
+    let moved = WarpMesh::parse(raw, 7, 7);
+    assert!(moved.controls[27][0][0] > 1.0 && moved.controls[27][0][1] > 1.0);
+    assert_eq!(h.state().session.history.undo.len(), undo_len + 1);
+    assert_eq!(h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().transform().unwrap().get("position").unwrap().value, original_position);
+    let tangent = rect(&h, &format!("{vertex}.tangent.2")).center();
+    let undo_len = h.state().session.history.undo.len();
+    drag(&mut h, tangent, tangent + egui::vec2(0.0, -18.0));
+    let g = group(&h, layer, fx);
+    let KV::Str(raw) = &g.get("mesh").unwrap().keys[0].value else { panic!("expected mesh data") };
+    assert!(WarpMesh::parse(raw, 7, 7).controls[27][2][1] < -1.0);
+    assert_eq!(h.state().session.history.undo.len(), undo_len + 1);
+    undo(&mut h);
+    let g = group(&h, layer, fx);
+    let KV::Str(raw) = &g.get("mesh").unwrap().keys[0].value else { panic!("expected mesh data") };
+    assert_eq!(WarpMesh::parse(raw, 7, 7), moved);
+    // Animated drags create a second mesh key; the renderer and property query agree between keys.
+    h.state_mut().session.execute("time.set", json!({"time": 1.0})).unwrap();
+    h.run_steps(4);
+    let from = rect(&h, &vertex).center();
+    drag(&mut h, from, from + egui::vec2(40.0, 0.0));
+    assert_eq!(group(&h, layer, fx).get("mesh").unwrap().keys.len(), 2);
+    let mesh_query = h.state_mut().session.execute("prop.get", json!({"layer": layer, "prop": prop, "time": 0.5})).unwrap();
+    let middle = WarpMesh::parse(mesh_query["value"].as_str().unwrap(), 7, 7);
+    assert!(middle.controls[27][0][0] > moved.controls[27][0][0]);
+    h.state_mut().session.execute("time.set", json!({"time": 0.5})).unwrap();
+    h.state_mut().session.execute("prop.toggleAnimation", json!({"layer": layer, "prop": prop, "value": false})).unwrap();
+    let g = group(&h, layer, fx);
+    assert!(g.get("mesh").unwrap().keys.is_empty());
+    let KV::Str(raw) = &g.get("mesh").unwrap().value else { panic!("expected mesh data") };
+    assert_eq!(WarpMesh::parse(raw, 7, 7), middle, "turning animation off keeps the displayed mesh");
+}
+
+#[test]
+fn mesh_warp_legacy_hidden_mesh_has_stopwatch_and_locked_layers_have_no_handles() {
+    let (mut s0, layer, fx) = with_effect("Mesh Warp");
+    let prop = {
+        let cid = s0.state.active_comp.unwrap();
+        let layer = std::sync::Arc::make_mut(&mut s0.project).comp_mut(cid).unwrap().layer_mut(LayerId(layer)).unwrap();
+        let prop = layer.props.find_group_mut(fx).unwrap().get_mut("mesh").unwrap();
+        prop.ui = effectcraft_engine::project::ParamUi::Hidden;
+        prop.hold_only = true;
+        prop.uid
+    };
+    let mut h = harness(s0);
+    click_id(&mut h, &format!("effectControls.prop.{prop}.stopwatch"));
+    assert!(!group(&h, layer, fx).get("mesh").unwrap().hold_only);
+    h.state_mut().toggle_maximize(PanelKind::EffectControls);
+    h.state_mut().session.state.selected_props = vec![(LayerId(layer), fx)];
+    h.run_steps(6);
+    rect(&h, &format!("viewer.mesh.{fx}.vertex.27"));
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "lock", "value": true})).unwrap();
+    h.run_steps(4);
+    assert!(!h.state().auto.elements.iter().any(|e| e.id.starts_with(&format!("viewer.mesh.{fx}."))));
+}
+
 /// UI fixes of M13.10: the Composition / Timeline tabs' close button, swatch and lock; the
 /// Preview panel scrolls in the default workspace (where it shows just the transport).
 #[test]

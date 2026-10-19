@@ -163,8 +163,9 @@ pub fn eval_standalone(project: &Project, comp: ItemId, layer: LayerId, path: &s
     let c = project.comp(comp).ok_or("no such comp")?;
     let l = c.layer(layer).ok_or("no such layer")?;
     let prop = l.props.prop(path).ok_or_else(|| format!("no property at {path}"))?;
-    let ctx = EvalCtx::new(project, comp, c, Tick::from_seconds_f64(t));
-    let value = prop.value_at(l.layer_time(ctx.time));
+    let mut ctx = EvalCtx::new(project, comp, c, Tick::from_seconds_f64(t));
+    ctx.expr = Some(&Expressions);
+    let value = ctx.keyframed_value(l, prop, l.layer_time(ctx.time));
     evaluate(&Expressions, &ctx, l, prop, &value, text)
 }
 
@@ -174,8 +175,9 @@ pub fn eval_property(project: &Project, comp: ItemId, layer: LayerId, path: &str
     let c = project.comp(comp).ok_or("no such comp")?;
     let l = c.layer(layer).ok_or("no such layer")?;
     let prop = l.props.prop(path).ok_or_else(|| format!("no property at {path}"))?;
-    let ctx = EvalCtx::new(project, comp, c, Tick::from_seconds_f64(t));
-    let value = prop.value_at(l.layer_time(ctx.time));
+    let mut ctx = EvalCtx::new(project, comp, c, Tick::from_seconds_f64(t));
+    ctx.expr = Some(&Expressions);
+    let value = ctx.keyframed_value(l, prop, l.layer_time(ctx.time));
     match &prop.expr {
         Some(e) if prop.has_expression() => evaluate(&Expressions, &ctx, l, prop, &value, &e.text),
         _ => Ok(value),

@@ -539,12 +539,15 @@ pub(crate) fn update(
             None
         }
         Drag::KeyTangent { layer, prop, time, out, key, inv } => {
+            // Roving changes key times during the gesture. Its stored index stays stable.
+            let index = app.session.active_comp()?.layer(layer)?.props.find(prop)?.keys.iter().position(|key| key.time == time)?;
             let p = inv.apply(gv2(cpt[0], cpt[1]));
             let tg = json!([p.x - key[0], p.y - key[1], 0.0]);
             let mut q = json!({"layer": layer.0, "prop": prop, "time": time.seconds(), "break": mods.alt, "merge": merge});
             q[if out { "out" } else { "in" }] = tg;
             let _ = app.session.execute("keys.setSpatialTangents", q);
-            None
+            let time = app.session.active_comp()?.layer(layer)?.props.find(prop)?.keys.get(index)?.time;
+            Some(Drag::KeyTangent { layer, prop, time, out, key, inv })
         }
         Drag::Ft { layer, path, mode, anchor, last, inv, axes } => {
             let p = inv.apply(gv2(cpt[0], cpt[1]));

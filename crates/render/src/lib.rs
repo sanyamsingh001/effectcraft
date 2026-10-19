@@ -41,7 +41,8 @@ pub trait FootageSource: Send + Sync {
     /// The frame of `item` at source time `t`, straight from the file (any size).
     fn frame(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<Image>>;
     /// `frames` interleaved stereo sample frames of `item`'s audio from source time `t` at
-    /// `rate` Hz (`None` when unavailable).
+    /// `rate` Hz (`None` when unavailable). The first sample is `t.to_units_floor(rate)`;
+    /// a sample boundary uses the earliest representable tick that selects that sample.
     fn audio(&self, _item: ItemId, _footage: &Footage, _t: Tick, _frames: usize, _rate: u32) -> Option<Vec<f32>> {
         None
     }
@@ -170,6 +171,10 @@ impl EffectHost for FxHost<'_, '_, '_> {
         let g = self.layer.effects()?.groups().nth(i)?;
         let ctx = self.ctx.at(self.layer.comp_time(Tick::from_seconds_f64(layer_time)));
         Some(effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(self.layer, pr)))
+    }
+
+    fn has_active_comp_camera(&self) -> bool {
+        self.ctx.comp.active_camera(self.ctx.time).is_some()
     }
 
     fn comp_scene(&self) -> Option<effectcraft_effects::CompScene> {

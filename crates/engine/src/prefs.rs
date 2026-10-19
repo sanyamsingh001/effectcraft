@@ -66,7 +66,7 @@ page!(General {
     /// Interface language: `system` (the operating system's, where EffectCraft has it, else
     /// English), `en` or `ja`.
     language: String = "system".into(),
-    /// Levels of Undo (1–99).
+    /// Levels of Undo (1–1000).
     undo_levels: u32 = 32,
     /// Path Point and Handle Size (px).
     path_point_size: u32 = 5,
@@ -140,6 +140,8 @@ page!(Appearance {
     theme: String = "dark".into(),
     /// User interface brightness, -1 (darker) … 1 (lighter).
     brightness: f64 = 0.0,
+    /// Global interface scale in egui points, independent of the display's pixel density.
+    ui_scale: f64 = 1.0,
     use_label_color_for_handles: bool = true,
     use_label_color_for_tabs: bool = true,
     cycle_mask_colors: bool = true,
@@ -447,13 +449,14 @@ impl Prefs {
         if !is_choice(LANGUAGES, &g.language) {
             g.language = General::default().language;
         }
-        g.undo_levels = g.undo_levels.clamp(1, 99);
+        g.undo_levels = g.undo_levels.clamp(1, 1000);
         g.path_point_size = g.path_point_size.clamp(3, 20);
         g.recent_items = g.recent_items.clamp(1, 30);
         let a = &mut self.auto_save;
         a.interval_minutes = a.interval_minutes.clamp(1, 240);
         a.max_versions = a.max_versions.clamp(1, 99);
         self.appearance.brightness = self.appearance.brightness.clamp(-1.0, 1.0);
+        self.appearance.ui_scale = if self.appearance.ui_scale.is_finite() { self.appearance.ui_scale.clamp(0.75, 2.0) } else { 1.0 };
         let defaults = default_labels();
         self.labels.truncate(defaults.len());
         for d in defaults.iter().skip(self.labels.len()) {
@@ -916,7 +919,7 @@ pub fn pages() -> Vec<Page> {
             title: "General",
             items: vec![
                 s("general.language", "Language", Kind::Choice(LANGUAGES), true),
-                s("general.undoLevels", "Levels of Undo", Kind::Int(1, 99, ""), true),
+                s("general.undoLevels", "Levels of Undo", Kind::Int(1, 1000, ""), true),
                 s("general.pathPointSize", "Path Point and Handle Size", Kind::Int(3, 20, "px"), true),
                 s("general.recentItems", "Recent Projects Shown", Kind::Int(1, 30, ""), true),
                 Section("Options"),
@@ -1009,6 +1012,7 @@ pub fn pages() -> Vec<Page> {
             items: vec![
                 s("appearance.theme", "Theme", Kind::Choice(&[("Dark", "dark"), ("Darker", "darker"), ("Light", "light")]), true),
                 s("appearance.brightness", "Brightness", Kind::Slider(-1.0, 1.0), true),
+                s("appearance.uiScale", "UI Scale", Kind::Float(0.75, 2.0, "×"), true),
                 Section("Labels and Colors"),
                 s("appearance.useLabelColorForHandles", "Use Label Color for Layer Handles and Paths", B, true),
                 s("appearance.useLabelColorForTabs", "Use Label Color for Related Tabs", B, true),

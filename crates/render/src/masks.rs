@@ -22,11 +22,8 @@ pub struct MaskBlur {
     pub samples: usize,
 }
 
-/// Coverage of one mask in buffer pixels (before mode/opacity/invert). With mask motion blur
-/// (Layer ▸ Mask ▸ Motion Blur: On, or Same As Layer with the layer's switch on) an animated
-/// path is averaged over the comp's shutter.
-fn coverage(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, buf: &Buf, blur: MaskBlur) -> Option<Mask> {
-    let mb = blur.allowed
+fn motion_blurred(g: &effectcraft_project::PropGroup, blur: MaskBlur) -> bool {
+    blur.allowed
         && match g.kind {
             GroupKind::Mask { motion_blur, .. } => match motion_blur {
                 MaskMotionBlur::On => true,
@@ -34,7 +31,47 @@ fn coverage(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, bu
                 MaskMotionBlur::SameAsLayer => blur.layer,
             },
             _ => false,
-        };
+        }
+}
+
+fn shutter_time(ctx: &EvalCtx, index: usize, samples: usize) -> effectcraft_time::Tick {
+    let f = ctx.comp.shutter_phase / 360.0 + ctx.comp.shutter_angle / 360.0 * index as f64 / (samples - 1) as f64;
+    ctx.time + effectcraft_time::Tick::from_seconds_f64(f * ctx.comp.frame_duration().seconds())
+}
+
+/// Averaging each mask separately cannot represent an open path's absence from the stack.
+/// Only changing open/closed paths need the more expensive complete-stack shutter samples.
+fn mixed_shutter_paths(ctx: &EvalCtx, layer: &Layer, blur: MaskBlur) -> bool {
+    let Some(masks) = layer.masks() else { return false };
+    masks.groups().any(|g| {
+        if !g.enabled || !matches!(g.kind, GroupKind::Mask { mode, .. } if mode != MaskMode::None) || !motion_blurred(g, blur) {
+            return false;
+        }
+        let Some(path) = g.get("path") else { return false };
+        if !path.has_expression() && path.keys.len() < 2 {
+            return false;
+        }
+        let (mut open, mut closed) = (false, false);
+        let samples = blur.samples.max(2);
+        for i in 0..samples {
+            let sub = ctx.at(shutter_time(ctx, i, samples));
+            match sub.group_value(layer, g, "path") {
+                Some(Value::Path(path)) if path.closed => closed = true,
+                _ => open = true,
+            }
+            if open && closed {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// Coverage of one mask in buffer pixels (before mode/opacity/invert). With mask motion blur
+/// (Layer ▸ Mask ▸ Motion Blur: On, or Same As Layer with the layer's switch on) an animated
+/// path is averaged over the comp's shutter.
+fn coverage(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, buf: &Buf, blur: MaskBlur) -> Option<Mask> {
+    let mb = motion_blurred(g, blur);
     let animated = g.get("path").is_some_and(|p| p.keys.len() > 1 || p.has_expression());
     if mb && animated {
         let fd = ctx.comp.frame_duration().seconds();
@@ -62,6 +99,11 @@ fn coverage(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, bu
 
 fn coverage_at(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, buf: &Buf) -> Option<Mask> {
     let Value::Path(sp) = ctx.group_value(layer, g, "path")? else { return None };
+    // An unfinished Pen path remains visible as an overlay/effect path, but has no region
+    // to clip until it is closed.
+    if !sp.closed {
+        return None;
+    }
     let path = effectcraft_path::to_kurbo(&sp);
     let (w, h) = (buf.img.width, buf.img.height);
     let m = Mat3::translate(vec2(buf.offset[0], buf.offset[1])) * Mat3::scale(vec2(buf.scale, buf.scale));
@@ -130,21 +172,21 @@ pub fn shapes(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_effects::MaskShap
     out
 }
 
-/// Apply the layer's masks to its buffer.
-/// Returns whether any mask was applied.
-pub fn apply(ctx: &EvalCtx, layer: &Layer, buf: &mut Buf, blur: MaskBlur) -> bool {
-    let Some(masks) = layer.masks() else { return false };
-    let list: Vec<_> = masks.groups().filter(|g| g.enabled && matches!(g.kind, GroupKind::Mask { mode, .. } if mode != MaskMode::None)).collect();
-    if list.is_empty() {
-        return false;
-    }
-    // Masks may extend past the source: grow the buffer to cover them when feather/expansion pads.
-    let n = (buf.img.width * buf.img.height) as usize;
-    let first_sub = matches!(list[0].kind, GroupKind::Mask { mode: MaskMode::Subtract, .. });
-    let mut acc = vec![if first_sub { 1.0f32 } else { 0.0 }; n];
-    for g in list {
+fn accumulated(ctx: &EvalCtx, layer: &Layer, buf: &Buf, blur: MaskBlur, sample: Option<&EvalCtx>) -> Option<Vec<f32>> {
+    let masks = layer.masks()?;
+    let mut accumulated = None;
+    for g in masks.groups().filter(|g| g.enabled && matches!(g.kind, GroupKind::Mask { mode, .. } if mode != MaskMode::None)) {
         let GroupKind::Mask { mode, inverted, .. } = g.kind else { continue };
-        let Some(mut cov) = coverage(ctx, layer, g, buf, blur) else { continue };
+        let cov = if let Some(sub) = sample {
+            let animated = g.get("path").is_some_and(|p| p.keys.len() > 1 || p.has_expression());
+            coverage_at(if animated && motion_blurred(g, blur) { sub } else { ctx }, layer, g, buf)
+        } else {
+            coverage(ctx, layer, g, buf, blur)
+        };
+        let Some(mut cov) = cov else { continue };
+        // Start from the first mask that actually clips. Open/malformed paths must neither
+        // clear the layer by themselves nor change how a following Subtract mask starts.
+        let acc = accumulated.get_or_insert_with(|| vec![if mode == MaskMode::Subtract { 1.0f32 } else { 0.0 }; buf.img.data.len()]);
         let op = (ctx.f(layer, g, "opacity", 100.0) / 100.0) as f32;
         cov.data.par_iter_mut().for_each(|c| {
             if inverted {
@@ -164,6 +206,36 @@ pub fn apply(ctx: &EvalCtx, layer: &Layer, buf: &mut Buf, blur: MaskBlur) -> boo
             };
         });
     }
+    accumulated
+}
+
+/// Apply the layer's masks to its buffer.
+/// Returns whether any mask was applied.
+pub fn apply(ctx: &EvalCtx, layer: &Layer, buf: &mut Buf, blur: MaskBlur) -> bool {
+    let acc = if mixed_shutter_paths(ctx, layer, blur) {
+        let samples = blur.samples.max(2);
+        let weight = 1.0 / samples as f32;
+        let mut average = vec![0.0; buf.img.data.len()];
+        let mut applied = false;
+        for i in 0..samples {
+            let sub = ctx.at(shutter_time(ctx, i, samples));
+            match accumulated(ctx, layer, buf, blur, Some(&sub)) {
+                Some(mask) => {
+                    applied = true;
+                    average.iter_mut().zip(mask).for_each(|(a, coverage)| *a += coverage * weight);
+                }
+                // No closed mask at this sample means the layer remains fully visible.
+                None => average.iter_mut().for_each(|a| *a += weight),
+            }
+        }
+        if !applied {
+            return false;
+        }
+        average
+    } else {
+        let Some(acc) = accumulated(ctx, layer, buf, blur, None) else { return false };
+        acc
+    };
     buf.img.mul_mask(&acc);
     true
 }

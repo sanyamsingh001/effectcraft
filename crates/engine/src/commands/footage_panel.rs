@@ -40,6 +40,12 @@ fn footage_item(s: &Session, p: &Value, cmd: &str) -> Result<ItemId> {
 
 /// Source duration and frame rate of a footage / solid item (stills: `None`).
 fn source_timing(s: &Session, item: ItemId) -> (Option<Tick>, effectcraft_time::FrameRate) {
+    if let Some(source) = s.project.item(item)
+        && let ItemKind::Footage(f) = &source.kind
+        && f.kind == effectcraft_project::FootageKind::Sequence
+    {
+        return (source.source_span().map(|(duration, _)| duration), f.frame_rate);
+    }
     match s.project.item(item).map(|i| &i.kind) {
         Some(ItemKind::Footage(f)) if f.kind != effectcraft_project::FootageKind::Still && f.duration > Tick::ZERO => (Some(f.duration), f.frame_rate),
         Some(ItemKind::Footage(f)) => (None, f.frame_rate),
@@ -69,6 +75,12 @@ fn view_mut<'a>(s: &'a mut Session, cmd: &str) -> Result<&'a mut FootageView> {
 }
 
 fn clamp_time(s: &Session, item: ItemId, t: Tick) -> Tick {
+    if let Some(source) = s.project.item(item)
+        && matches!(&source.kind, ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::Sequence)
+        && let Some((_, last)) = source.source_span()
+    {
+        return t.clamp(Tick::ZERO, last);
+    }
     let (dur, fr) = source_timing(s, item);
     match dur {
         Some(d) => t.clamp(Tick::ZERO, (d - fr.frame_duration()).max(Tick::ZERO)),
@@ -90,10 +102,12 @@ fn set_mark(s: &mut Session, p: &Value, out: bool) -> Result<Value> {
     let t = source_time(s, p, v.item).unwrap_or(v.time);
     let t = clamp_time(s, v.item, t);
     let (_, fr) = source_timing(s, v.item);
+    let sequence =
+        s.project.item(v.item).is_some_and(|item| matches!(&item.kind, ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::Sequence));
     let view = view_mut(s, c)?;
     if out {
         // The Out point marks the last frame shown: the range ends after it.
-        let end = t + fr.frame_duration();
+        let end = if sequence { fr.tick_of(fr.frame_at(t).saturating_add(1)) } else { t + fr.frame_duration() };
         view.out_point = Some(end);
         if view.in_point.is_some_and(|i| i >= end) {
             view.in_point = None;

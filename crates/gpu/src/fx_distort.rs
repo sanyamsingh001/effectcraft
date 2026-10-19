@@ -268,30 +268,24 @@ fn displacement_map(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 }
 
 fn mesh_warp(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
-    let rows = ctx.params.f("rows").round().clamp(1.0, 31.0) as usize;
-    let cols = ctx.params.f("columns").round().clamp(1.0, 31.0) as usize;
-    let q = ctx.params.f("quality").round().clamp(1.0, 10.0) as usize;
-    let offs = effectcraft_effects::parse_mesh(ctx.params.s("mesh"));
-    if offs.len() != (rows + 1) * (cols + 1) || offs.iter().all(|o| o.0 == 0.0 && o.1 == 0.0) {
+    use effectcraft_effects::WarpMesh;
+    let rows = WarpMesh::dimension(ctx.params.f("rows"));
+    let cols = WarpMesh::dimension(ctx.params.f("columns"));
+    let q = WarpMesh::dimension(ctx.params.f("quality")).clamp(3, 10);
+    let mesh = WarpMesh::parse(ctx.params.s("mesh"), rows, cols);
+    if mesh.is_identity() {
         return Some(b);
     }
     let (lw, lh) = (ctx.layer_size[0], ctx.layer_size[1]);
-    let vert = |i: usize, j: usize| {
-        let o = offs[j * (cols + 1) + i];
-        b.to_px([i as f64 / cols as f64 * lw + o.0, j as f64 / rows as f64 * lh + o.1])
-    };
     let (nx, ny) = (cols * q, rows * q);
     let mut dest = Vec::with_capacity((nx + 1) * (ny + 1));
     let mut srcp = Vec::with_capacity((nx + 1) * (ny + 1));
     for gj in 0..=ny {
         for gi in 0..=nx {
-            let (ci, cj) = ((gi / q).min(cols - 1), (gj / q).min(rows - 1));
-            let (u, v) = ((gi - ci * q) as f64 / q as f64, (gj - cj * q) as f64 / q as f64);
-            let (p00, p10, p01, p11) = (vert(ci, cj), vert(ci + 1, cj), vert(ci, cj + 1), vert(ci + 1, cj + 1));
-            let x = (p00.0 * (1.0 - u) + p10.0 * u) * (1.0 - v) + (p01.0 * (1.0 - u) + p11.0 * u) * v;
-            let y = (p00.1 * (1.0 - u) + p10.1 * u) * (1.0 - v) + (p01.1 * (1.0 - u) + p11.1 * u) * v;
-            dest.push((x, y));
-            srcp.push(b.to_px([gi as f64 / nx as f64 * lw, gj as f64 / ny as f64 * lh]));
+            let point = mesh.sample(gi as f64 / nx as f64, gj as f64 / ny as f64, [lw, lh]);
+            let origin = ctx.env.bounds_origin;
+            dest.push(b.to_px([point[0] + origin[0], point[1] + origin[1]]));
+            srcp.push(b.to_px([gi as f64 / nx as f64 * lw + origin[0], gj as f64 / ny as f64 * lh + origin[1]]));
         }
     }
     grid_warp(e, b, nx, ny, &dest, &srcp)
@@ -305,6 +299,7 @@ pub(crate) fn grid_warp(e: &mut Enc, b: GBuf, nx: usize, ny: usize, dest: &[(f64
     let mut tri_data: Vec<f32> = Vec::with_capacity(nx * ny * 24);
     let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); hh];
     let mut t = 0u32;
+    let mut index_count = 0usize;
     for j in 0..ny {
         for i in 0..nx {
             let (a, b2, c, d) = (idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1));
@@ -317,17 +312,29 @@ pub(crate) fn grid_warp(e: &mut Enc, b: GBuf, nx: usize, ny: usize, dest: &[(f64
                 if den.abs() < 1e-12 {
                     continue;
                 }
+                let (sa, sb, sc) = (srcp[ia], srcp[ib], srcp[ic]);
+                let data = [(pb.1 - pc.1) / den, (pc.0 - pb.0) / den, (pc.1 - pa.1) / den, (pa.0 - pc.0) / den, pc.0, pc.1, sa.0, sa.1, sb.0, sb.1, sc.0, sc.1]
+                    .map(|v| v as f32);
+                // The shared mesh accepts finite f64 controls. Values outside the GPU's
+                // representation must use the CPU rather than uploading infinities/NaNs.
+                // Native GPU arithmetic can flush subnormal barycentric coefficients to zero;
+                // exact zero coefficients remain valid.
+                if data.iter().any(|v| !v.is_finite()) || data[..4].iter().any(|v| *v != 0.0 && !v.is_normal()) {
+                    return None;
+                }
                 let ys = [pa.1, pb.1, pc.1];
                 let y0 = (ys[0].min(ys[1]).min(ys[2]) - 0.5).floor().max(0.0) as usize;
                 let y1 = (ys[0].max(ys[1]).max(ys[2]) + 0.5).ceil().max(0.0) as usize;
+                // Large folds can span every output row. Reject before growing the row
+                // index beyond 8 MiB; the renderer then uses its bounded CPU grid bins.
+                index_count = index_count.checked_add(y1.min(hh).saturating_sub(y0.min(hh)))?;
+                if index_count > 2 * 1024 * 1024 {
+                    return None;
+                }
                 for bucket in buckets.iter_mut().take(y1.min(hh)).skip(y0) {
                     bucket.push(t);
                 }
-                let (sa, sb, sc) = (srcp[ia], srcp[ib], srcp[ic]);
-                tri_data.extend(
-                    [(pb.1 - pc.1) / den, (pc.0 - pb.0) / den, (pc.1 - pa.1) / den, (pa.0 - pc.0) / den, pc.0, pc.1, sa.0, sa.1, sb.0, sb.1, sc.0, sc.1]
-                        .map(|v| v as f32),
-                );
+                tri_data.extend(data);
                 t += 1;
             }
         }

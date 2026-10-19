@@ -72,6 +72,60 @@ fn gltf_errors_are_reported() {
     assert!(gltf::split_glb(b"glTF\x01\0\0\0").is_err());
 }
 
+fn accessor_document(count: u64) -> serde_json::Value {
+    serde_json::json!({
+        "asset": {"version": "2.0"},
+        "buffers": [{"uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAAAAAA==", "byteLength": 16}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 16}],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": count, "type": "VEC3"}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}]
+    })
+}
+
+#[test]
+fn gltf_accessor_counts_are_bounded_before_allocation() {
+    // Run only against the bounded reader: the original reader attempted this allocation.
+    for count in [u64::MAX, 100_000_000] {
+        let doc = accessor_document(count);
+        assert!(gltf::parse(doc.to_string().as_bytes(), &|_| None).is_err());
+        let mut doc = accessor_document(0);
+        doc["accessors"].as_array_mut().unwrap().push(serde_json::json!({"componentType": 5125, "count": count, "type": "SCALAR"}));
+        doc["meshes"][0]["primitives"][0]["indices"] = serde_json::json!(1);
+        assert!(gltf::parse(doc.to_string().as_bytes(), &|_| None).is_err());
+    }
+}
+
+#[test]
+fn gltf_byte_ranges_cannot_overflow_or_escape_their_view() {
+    let mut doc = accessor_document(1);
+    doc["bufferViews"][0]["byteOffset"] = serde_json::json!(u64::MAX);
+    assert!(gltf::parse(doc.to_string().as_bytes(), &|_| None).is_err());
+    let mut doc = accessor_document(1);
+    doc["accessors"][0]["byteOffset"] = serde_json::json!(u64::MAX);
+    assert!(gltf::parse(doc.to_string().as_bytes(), &|_| None).is_err());
+    let mut doc = accessor_document(2);
+    doc["bufferViews"][0]["byteStride"] = serde_json::json!(u64::MAX);
+    assert!(gltf::parse(doc.to_string().as_bytes(), &|_| None).is_err());
+    let mut doc = accessor_document(1);
+    doc["bufferViews"][0]["byteLength"] = serde_json::json!(4);
+    assert!(gltf::parse(doc.to_string().as_bytes(), &|_| None).is_err());
+    let mut doc = accessor_document(0);
+    doc["bufferViews"][0]["byteOffset"] = serde_json::json!(1);
+    doc["bufferViews"][0]["byteLength"] = serde_json::json!(u64::MAX);
+    doc["images"] = serde_json::json!([{"bufferView": 0}]);
+    assert!(gltf::parse(doc.to_string().as_bytes(), &|_| None).is_err());
+}
+
+#[test]
+fn glb_chunk_lengths_cannot_escape_the_declared_container() {
+    let mut bytes = b"glTF".to_vec();
+    bytes.extend(2u32.to_le_bytes());
+    bytes.extend(20u32.to_le_bytes());
+    bytes.extend(u32::MAX.to_le_bytes());
+    bytes.extend(0x4E4F_534Au32.to_le_bytes());
+    assert!(gltf::split_glb(&bytes).is_err());
+}
+
 #[test]
 fn base64_and_uri_decoding() {
     assert_eq!(gltf::base64_decode("aGVsbG8=").unwrap(), b"hello");

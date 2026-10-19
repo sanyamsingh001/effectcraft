@@ -85,8 +85,8 @@ may be absent from the last checkpoint.
 | `get_project` / `get_comp {comp?}` | Project items, comp settings and layers. |
 | `get_layer {layer, comp?, time?, depth?, flat?}` | A layer's property tree (`depth` limits how many group levels expand). Every node has a `path`. |
 | `get_property {layer, path, comp?, time?}` | Value at a time, keyframes and expression. |
-| `set_property {layer, path, value?, time?, expression?, comp?}` | Sets a static value. With `time` it sets a keyframe; with `expression` it sets an expression. |
-| `add_keyframe {layer, path, time+value \| keys:[...], interpolation?, comp?}` | Adds keys, then optionally applies linear/bezier/hold/easyEase. |
+| `set_property {layer, path, value?, time?, timeBase?, expression?, comp?}` | Sets a static value. With `time` it sets a keyframe; with `expression` it sets an expression. |
+| `add_keyframe {layer, path, time+value \| keys:[...], interpolation?, timeBase?, comp?}` | Adds keys, then optionally applies linear/bezier/hold/easyEase. |
 | `list_effects {filter?}` | Effect ids, names, categories, GPU / 32-bpc support and parameters. |
 | `list_fonts {query?, rescan?}` | Font families text layers can use, bundled and installed, with their styles, origin and own-language name; `rescan` picks up fonts installed since launch. |
 | `add_effect {layer, effect, values?, comp?}` | Apply an effect and set its parameters in one call and one undo step (a failing value leaves nothing applied); returns the instance path (`effects/#n`) and its parameter paths. |
@@ -101,8 +101,21 @@ may be absent from the last checkpoint.
 Layers are referenced by id (from `get_comp`), `"#n"` (1-based index from the top) or name. Comps are
 referenced by id or name, and default to the active comp. Property paths come from `get_layer`, for
 example `transform/position`, `transform/opacity`, `effects/#1/blurriness` or `@57` (by uid). Times
-are in seconds. Keyframe times are layer time, which equals comp time unless the layer is offset or
-stretched.
+are in seconds. Reads (`get_property`, `get_layer`, `prop.get`), rendering and the CTI use comp
+time. Explicit keyframe times default to layer time, which differs on offset or stretched layers.
+`set_property`, `add_keyframe`, `prop.set`, `prop.addKey`, `keys.set` (both `time` and `newTime`)
+and `keys.select` (every `keys[].time`) accept `timeBase: "layer" | "comp"`; omitted means `layer`.
+Without an explicit time, property writes still use the comp's CTI. Writes snap to the nearest
+comp frame before converting to stored layer time, including on stretched or reversed layers.
+Key replies include `layerTime` and `compTime` when a time base is supplied, and a `warning` if a
+key is outside the layer's active `[in, out)` range. Ordinary engine calls without `timeBase`
+keep their scalar value/count reply; warnings add timing metadata. `prop.get` and MCP replies
+include both times on each key; MCP writes also report their added/written key times.
+
+Set offsets with `layer.timing {layer, start: 10.5}`; `in`, `out` and `delta` also use comp seconds.
+For a layer starting at 10.5 s, `add_keyframe {layer: "A", path: "transform/opacity", time: 15.3,
+timeBase: "comp", value: 0}` writes a key at comp 15.3 s (layer 4.8 s), matching a read with
+`get_property {layer: "A", path: "transform/opacity", time: 15.3}`.
 
 Command params are checked against each command's `params` doc. An unknown key, such as
 `layer.select {"index": 2}`, returns an error that lists the accepted keys (here `layers, add, toggle`)
@@ -190,6 +203,10 @@ build real projects through these interfaces; they are worked examples of everyt
   `contents/group/contents/gfill`), ready for `set_property`. `@uid` works as a whole path.
 * **One call, one undo step**: `batch {"steps":[{"command":"layer.newShape","params":{"kind":"ellipse","name":"Ring"}},{"command":"layer.addShapeItem","params":{"layer":"$1.layer","kind":"trim"}},{"command":"prop.addKey","params":{"layer":"$1.layer","path":"transform/opacity","time":0,"value":0}}]}`
   (a string param that is exactly `"$N"` or `"$N.key"` is replaced; `$2.path` is the trim's path).
+  Atomic batches reject saves that replace the saved checkpoint, `prefs.set`/`prefs.reset`,
+  and shortcut mutations. Run those commands after the batch, or pass `atomic: false` when
+  their side effects are intended. Incidental preference updates, such as recent imports,
+  persist only when the atomic batch succeeds.
 * **Expressions**: `set_property`/`get_property` replies carry `evaluated` (what renders) next to
   `value` (the keyframed value) and `expressionError` when the expression fails. An expression with
   a syntax error is kept but disabled, so it renders `value` and reports the syntax error.
@@ -216,7 +233,18 @@ build real projects through these interfaces; they are worked examples of everyt
 * **Essential Graphics**: controls can be addressed by name (`essential.set {"layer":"#1",
   "control":"Title","value":"John Smith"}`); a command that targets an explicit `comp` runs even
   when the active comp would disable it (`essential.exportTemplate {"comp":"Lower Third", …}`).
-* **History**: Levels of Undo defaults to 32 (`prefs.set {"key":"general.undoLevels","value":99}`);
+  The CLI also renders an exported template directly:
+  `effectcraft-cli render --template lt.ectemplate --values values.json --out title_[#####].png`.
+  `values.json` is an object such as `{"Title":"John Smith","Bar Color":"#00c080","Bar Opacity":50}`;
+  names follow `essential.set`, including its case-insensitive matching. Values override one
+  imported instance; the template file and its source controls keep their defaults. Omit
+  `--values` to render those defaults, or use the same options with `render-frame` for a PNG.
+  Newly exposed Transform Scale controls show linked percentage axes. Toggle Constrain Proportions
+  in the panel, or use `essential.setScaleLinked {"comp":"Lower Third","control":"Scale","linked":false}`
+  to edit axes independently. Existing Point and explicit uniform Scale controls keep their behavior.
+  Values must fit in 1 MiB. Invalid JSON, unknown controls and invalid values fail before rendering.
+  Template mode cannot be combined with `--project`, `--demo`, `--bridge`, `--queue` or `--comp`.
+* **History**: Levels of Undo accepts 1–1000 and defaults to 32 (`prefs.set {"key":"general.undoLevels","value":1000}`);
   `history` lists branches and `history {"goto": id}` jumps between them. A command that changes
   nothing (a value set to what it already is) records no undo step. `get_state` reports `dirty`
   (unsaved changes); it follows undo, so undoing back to the saved state clears it.

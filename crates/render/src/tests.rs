@@ -80,6 +80,79 @@ fn mask_cuts_layer() {
     assert!(img.get(150, 50)[3] < 0.01);
 }
 
+/// #290: Pen points preserve the image until the path closes.
+#[test]
+fn open_masks_leave_the_layer_visible_until_closed() {
+    let (mut p, cid, comp) = setup();
+    let l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let original = render_frame(&p, cid, Tick::ZERO, 1.0);
+    let vertices = [[30.0, 30.0], [70.0, 30.0], [70.0, 70.0], [30.0, 70.0]];
+    for count in 1..=vertices.len() {
+        let path = ShapePath {
+            vertices: vertices[..count].to_vec(),
+            in_tangents: vec![[0.0; 2]; count],
+            out_tangents: vec![[0.0; 2]; count],
+            closed: false,
+            feather: vec![],
+        };
+        let mut next = p.next_id;
+        let m = build::mask(&mut Ids(&mut next), "Mask 1", path, MaskMode::Add, [255, 255, 0]);
+        p.next_id = next;
+        let masks = p.comp_mut(cid).unwrap().layers[0].props.sub_mut("masks").unwrap();
+        masks.children = vec![m.into()];
+        assert_eq!(render_frame(&p, cid, Tick::ZERO, 1.0), original, "{count} unfinished points");
+    }
+    let prop = p.comp_mut(cid).unwrap().layers[0].props.prop_mut("masks/#1/path").unwrap();
+    let Value::Path(path) = &mut prop.value else { panic!("mask path") };
+    path.closed = true;
+    let closed = render_frame(&p, cid, Tick::ZERO, 1.0);
+    assert!(closed.get(50, 50)[3] > 0.99);
+    assert!(closed.get(150, 50)[3] < 0.01);
+}
+
+#[test]
+fn open_masks_do_not_change_a_closed_subtract_mask() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    let mut next = p.next_id;
+    let mut path = ShapePath::rect([100.0, 50.0], 100.0, 60.0);
+    path.closed = false;
+    let unfinished = build::mask(&mut Ids(&mut next), "Unfinished", path, MaskMode::Add, [255, 255, 0]);
+    let subtract = build::mask(&mut Ids(&mut next), "Cutout", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Subtract, [255, 255, 0]);
+    p.next_id = next;
+    l.props.sub_mut("masks").unwrap().children = vec![subtract.clone().into()];
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let original = render_frame(&p, cid, Tick::ZERO, 1.0);
+    assert!(original.get(50, 50)[3] < 0.01 && original.get(150, 50)[3] > 0.99);
+    for children in [vec![unfinished.clone().into(), subtract.clone().into()], vec![subtract.clone().into(), unfinished.clone().into()]] {
+        p.comp_mut(cid).unwrap().layers[0].props.sub_mut("masks").unwrap().children = children;
+        assert_eq!(render_frame(&p, cid, Tick::ZERO, 1.0), original);
+    }
+}
+
+#[test]
+fn effects_still_see_open_mask_paths() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
+    let mut next = p.next_id;
+    let path = ShapePath {
+        vertices: vec![[30.0, 50.0], [70.0, 50.0]],
+        in_tangents: vec![[0.0; 2]; 2],
+        out_tangents: vec![[0.0; 2]; 2],
+        closed: false,
+        feather: vec![],
+    };
+    let m = build::mask(&mut Ids(&mut next), "Mask 1", path, MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    l.props.sub_mut("masks").unwrap().children.push(m.into());
+    add_effect(&mut p, &mut l, "ec.generate.stroke", [200.0, 100.0], &[("brushSize", Value::Scalar(6.0))]);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+    assert!(img.get(50, 50)[0] > 0.5, "stroke sees the open path");
+    assert!(img.get(150, 50)[3] > 0.99, "the open path does not clip the layer");
+}
+
 #[test]
 fn track_matte_alpha() {
     let (mut p, cid, comp) = setup();

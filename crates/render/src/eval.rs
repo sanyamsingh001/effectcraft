@@ -61,13 +61,39 @@ impl<'a> EvalCtx<'a> {
             return Value::Vec3([self.value(layer, px).as_f64(), y, z]);
         }
         let lt = layer.layer_time(self.time);
-        let v = prop.value_at(lt);
+        let v = self.keyframed_value(layer, prop, lt);
         if prop.has_expression()
             && let Some(h) = self.expr
         {
             return h.eval(self, layer, prop, &v).unwrap_or(v);
         }
         v
+    }
+    /// Pre-expression value, including structured effect data whose storage is a string.
+    pub fn keyframed_value(&self, layer: &Layer, prop: &Property, time: Tick) -> Value {
+        // A separated Position leader reads its raw scalar tracks before expressions.
+        if prop.match_id == "position"
+            && let Some(transform) = layer.transform()
+            && let Some(x) = transform.get("positionX")
+            && transform.get("position").is_some_and(|leader| leader.uid == prop.uid)
+        {
+            let y = transform.get("positionY").map(|axis| axis.value_at(time).as_f64()).unwrap_or(0.0);
+            let z = transform.get("positionZ").map(|axis| axis.value_at(time).as_f64()).unwrap_or(0.0);
+            return Value::Vec3([x.value_at(time).as_f64(), y, z]);
+        }
+        if prop.match_id == "mesh"
+            && let Some(g) = layer.effects().and_then(|fx| {
+                fx.groups().find(|g| {
+                    matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect } if effect == "ec.distort.meshwarp")
+                        && g.get("mesh").is_some_and(|p| p.uid == prop.uid)
+                })
+            })
+        {
+            let parameter_context = self.at(layer.comp_time(time));
+            let dimension = |id| effectcraft_effects::WarpMesh::dimension(g.get(id).map(|p| parameter_context.value(layer, p).as_f64()).unwrap_or(7.0));
+            return effectcraft_effects::mesh_value(prop, dimension("rows"), dimension("columns"), time);
+        }
+        prop.value_at(time)
     }
     pub fn group_value(&self, layer: &Layer, g: &PropGroup, m: &str) -> Option<Value> {
         g.get(m).map(|p| self.value(layer, p))
@@ -171,7 +197,19 @@ impl<'a> EvalCtx<'a> {
             let a = Vec3::from([anchor[0], anchor[1], 0.0]);
             let p = Vec3::from([pos[0], pos[1], 0.0]);
             let rz = rz + crate::three_d::camera::auto_orient_2d(self, layer);
-            return Mat4::layer_3d(a, p, Vec3::from(scale), Vec3::ZERO, vec3(0.0, 0.0, rz));
+            let skew = self.f(layer, tr, "skew", 0.0);
+            let skew = if skew.is_finite() { skew.clamp(-85.0, 85.0) } else { 0.0 };
+            if skew == 0.0 {
+                // Preserve the existing transform exactly for old/default-zero projects.
+                return Mat4::layer_3d(a, p, Vec3::from(scale), Vec3::ZERO, vec3(0.0, 0.0, rz));
+            }
+            let axis = self.f(layer, tr, "skewAxis", 0.0);
+            let axis = if axis.is_finite() { axis.rem_euclid(360.0) } else { 0.0 };
+            return Mat4::translate(p)
+                * Mat4::rotate_z(rz)
+                * Mat4::from_mat3_affine(&Mat3::skew_deg(-skew, axis))
+                * Mat4::scale(Vec3::from(scale) / 100.0)
+                * Mat4::translate(-a);
         }
         let rx = self.f(layer, tr, "rotationX", 0.0);
         let ry = self.f(layer, tr, "rotationY", 0.0);

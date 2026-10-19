@@ -168,6 +168,33 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     {
         return Ok(n);
     }
+    // An unkeyed Time Remap row can be removed like an effect. Falling through to layers here
+    // deleted the footage/precomp after its remap keys had been cleared (#290).
+    if p.get("layers").is_none()
+        && let (Some(cid), Some(comp)) = (s.active_comp_id(), s.active_comp())
+    {
+        let mut remaps: Vec<_> = s
+            .state
+            .selected_props
+            .iter()
+            .filter(|(lid, uid)| comp.layer(*lid).and_then(|l| l.props.get("timeRemap")).is_some_and(|pr| pr.uid == *uid))
+            .copied()
+            .collect();
+        if !remaps.is_empty() {
+            let editable = super::unlocked(s, cid, remaps.iter().map(|(lid, _)| *lid).collect(), "edit.clear")?;
+            remaps.retain(|(lid, _)| editable.contains(lid));
+            return s.edit("Remove Time Remapping", None, |proj, st| {
+                let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+                for (lid, uid) in &remaps {
+                    if let Some(l) = comp.layer_mut(*lid) {
+                        l.props.children.retain(|n| n.uid() != *uid);
+                    }
+                }
+                st.selected_props.retain(|pr| !remaps.contains(pr));
+                Ok(json!(remaps.len()))
+            });
+        }
+    }
     let (cid, ids) = layers_p(s, p)?;
     let ids = super::unlocked(s, cid, ids, "edit.clear")?;
     // Children of deleted layers are unparented where they are (like After Effects).

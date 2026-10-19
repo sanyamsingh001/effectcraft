@@ -546,3 +546,40 @@ fn graph_transform_box_scales_key_times_and_values() {
     assert_eq!(p.keys[1].value.as_f64(), 50.0);
     assert!(s.execute("keys.transform", json!({"timeScale": 0})).is_err());
 }
+
+/// A Pen point's creation and tangent changes share the same command merge key.
+#[test]
+fn pen_mask_creation_and_tangents_share_an_undo_step() {
+    let mut s = comp();
+    s.execute("layer.newSolid", json!({"name": "Plate"})).unwrap();
+    let lid = s.active_comp().unwrap().layers[0].id.0;
+    let mask = s.execute("mask.new", json!({"layer": lid, "vertices": [[100, 100]], "merge": "pen-gesture-1"})).unwrap()["mask"].as_u64().unwrap();
+    for delta in [5, 10, 20] {
+        s.execute("mask.setVertex", json!({"layer": lid, "mask": mask, "index": 0, "in": [-delta, -delta], "out": [delta, delta], "merge": "pen-gesture-1"}))
+            .unwrap();
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(layer(&s, lid).masks().unwrap().groups().next().is_none(), "Undo removes point creation and its tangent changes together");
+    s.execute("edit.redo", json!({})).unwrap();
+    let restored = layer(&s, lid);
+    let path = restored.props.prop("masks/#1/path").unwrap().value.as_path().unwrap();
+    assert_eq!(path.vertices, [[100.0, 100.0]]);
+    assert_eq!(path.out_tangents, [[20.0, 20.0]]);
+}
+
+#[test]
+fn pen_shape_creation_and_tangents_share_an_undo_step() {
+    let mut s = comp();
+    let result = s.execute("shape.newPath", json!({"vertices": [[100, 100]], "space": "layer", "merge": "pen-gesture-1"})).unwrap();
+    let (lid, path) = (result["layer"].as_u64().unwrap(), result["path"].as_u64().unwrap());
+    for delta in [5, 10, 20] {
+        s.execute("mask.setVertex", json!({"layer": lid, "mask": path, "index": 0, "in": [-delta, -delta], "out": [delta, delta], "merge": "pen-gesture-1"}))
+            .unwrap();
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.active_comp().unwrap().layers.is_empty(), "Undo removes shape creation and its tangent changes together");
+    s.execute("edit.redo", json!({})).unwrap();
+    let restored = shape_path(&s, lid, path);
+    assert_eq!(restored.vertices, [[100.0, 100.0]]);
+    assert_eq!(restored.out_tangents, [[20.0, 20.0]]);
+}

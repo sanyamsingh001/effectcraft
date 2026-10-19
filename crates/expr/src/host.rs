@@ -387,7 +387,8 @@ impl<'a> Resolver<'a> {
             Req::Value { comp, layer, path, t, pre } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let t = f64::from_bits(*t);
-                let v = if *pre { p.value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { self.ctx_at(*comp, t)?.value(l, p) };
+                let ctx = self.ctx_at(*comp, t)?;
+                let v = if *pre { ctx.keyframed_value(l, p, l.layer_time(Tick::from_seconds_f64(t))) } else { ctx.value(l, p) };
                 value_resp(&v, prop_dims(l, p))
             }
             Req::Doc { comp, layer, path, t, pre } => {

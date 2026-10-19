@@ -254,36 +254,58 @@ fn get_property(b: &mut Backend, a: &Value) -> Result<Reply> {
     json_reply(b.exec("prop.get", p)?)
 }
 
+fn key_time_base(a: &Value) -> Result<Value> {
+    match get(a, "timeBase") {
+        None => Ok(json!("layer")),
+        Some(Value::String(b)) if b == "layer" || b == "comp" => Ok(json!(b)),
+        Some(_) => Err(Error::BadArgs("`timeBase` must be layer or comp".into())),
+    }
+}
+
+fn copy_key_timing(info: &mut Value, timing: &Value) {
+    for field in ["layerTime", "compTime", "warning"] {
+        if let Some(value) = timing.get(field) {
+            info[field] = value.clone();
+        }
+    }
+}
+
 fn set_property(b: &mut Backend, a: &Value) -> Result<Reply> {
     let (layer, path, comp, time) = (need(a, "layer")?, need(a, "path")?, get(a, "comp"), get(a, "time"));
+    let time_base = key_time_base(a)?;
     let (value, expr) = (get(a, "value"), get(a, "expression"));
     if value.is_none() && expr.is_none() {
         return Err(Error::BadArgs("give `value` and/or `expression`".into()));
     }
     let base = [("layer", Some(layer)), ("path", Some(path)), ("comp", comp)];
+    let mut timing = Value::Null;
     if let Some(v) = value {
         let mut p = obj(&base);
         p["value"] = v.clone();
-        match time {
+        p["timeBase"] = time_base.clone();
+        timing = match time {
             Some(t) => {
                 p["time"] = t.clone();
-                b.exec("prop.addKey", p)?;
+                b.exec("prop.addKey", p)?
             }
-            None => {
-                b.exec("prop.set", p)?;
-            }
-        }
+            None => b.exec("prop.set", p)?,
+        };
     }
     if let Some(e) = expr {
         let mut p = obj(&base);
         p["expression"] = e.clone();
         b.exec("prop.setExpression", p)?;
     }
-    json_reply(b.exec("prop.get", obj(&[("layer", Some(layer)), ("path", Some(path)), ("comp", comp), ("time", time)]))?)
+    // Read at the actual written comp frame, even when the supplied time was layer time.
+    let mut info = b.exec("prop.get", obj(&[("layer", Some(layer)), ("path", Some(path)), ("comp", comp), ("time", timing.get("compTime").or(time))]))?;
+    copy_key_timing(&mut info, &timing);
+    info["timeBase"] = time_base;
+    json_reply(info)
 }
 
 fn add_keyframe(b: &mut Backend, a: &Value) -> Result<Reply> {
     let (layer, path, comp) = (need(a, "layer")?, need(a, "path")?, get(a, "comp"));
+    let time_base = key_time_base(a)?;
     let keys: Vec<Value> = match get(a, "keys") {
         Some(Value::Array(k)) => k.clone(),
         Some(_) => return Err(Error::BadArgs("`keys` must be an array of {time, value?}".into())),
@@ -292,32 +314,67 @@ fn add_keyframe(b: &mut Backend, a: &Value) -> Result<Reply> {
     if keys.is_empty() {
         return Err(Error::BadArgs("no keys".into()));
     }
+    let interpolation = match get(a, "interpolation") {
+        None => None,
+        Some(Value::String(interp)) => Some(match interp.to_ascii_lowercase().as_str() {
+            "easyease" | "ease" => ("keys.easyEase", json!({})),
+            "easyeasein" => ("keys.easyEase", json!({"which": "in"})),
+            "easyeaseout" => ("keys.easyEase", json!({"which": "out"})),
+            i @ ("linear" | "bezier" | "hold") => ("keys.interpolation", json!({"interpolation": i})),
+            _ => return Err(Error::BadArgs(format!("unknown interpolation `{interp}` (linear, bezier, hold, easyEase, easyEaseIn, easyEaseOut)"))),
+        }),
+        Some(_) => return Err(Error::BadArgs("`interpolation` must be a string".into())),
+    };
     let base = [("layer", Some(layer)), ("path", Some(path)), ("comp", comp)];
+    let mut steps = vec![];
     for k in &keys {
         let mut p = obj(&base);
         p["time"] = need(k, "time")?.clone();
+        p["timeBase"] = time_base.clone();
         if let Some(v) = get(k, "value") {
             p["value"] = v.clone();
         }
-        b.exec("prop.addKey", p)?;
+        // Tool arguments are literal; text values/names such as "$1" are not batch refs.
+        steps.push(json!({"command": "prop.addKey", "params": p, "substitute": false}));
     }
-    let info = b.exec("prop.get", obj(&base))?;
-    if let Some(interp) = get(a, "interpolation").and_then(Value::as_str) {
-        // Key selection works on the active comp.
+    if let Some((command, params)) = interpolation {
+        // Resolve ids before editing. Selection uses actual snapped layer times from each
+        // write, and runs inside the same transaction as the writes and interpolation.
+        let info = b.exec("prop.get", obj(&base))?;
         if let Some(c) = comp {
-            b.exec("comp.open", json!({"comp": c}))?;
+            steps.push(json!({"command": "comp.open", "params": {"comp": c}, "substitute": false}));
         }
-        let sel: Vec<Value> = keys.iter().map(|k| json!({"layer": info["layer"], "prop": info["uid"], "time": k["time"]})).collect();
-        b.exec("keys.select", json!({"keys": sel}))?;
-        match interp.to_ascii_lowercase().as_str() {
-            "easyease" | "ease" => b.exec("keys.easyEase", json!({}))?,
-            "easyeasein" => b.exec("keys.easyEase", json!({"which": "in"}))?,
-            "easyeaseout" => b.exec("keys.easyEase", json!({"which": "out"}))?,
-            i @ ("linear" | "bezier" | "hold") => b.exec("keys.interpolation", json!({"interpolation": i}))?,
-            other => return Err(Error::BadArgs(format!("unknown interpolation `{other}` (linear, bezier, hold, easyEase, easyEaseIn, easyEaseOut)"))),
-        };
-        return json_reply(b.exec("prop.get", obj(&base))?);
+        let properties = info.get("keyProperties").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![info["uid"].clone()]);
+        let layer = &info["layer"];
+        let sel: Vec<Value> = keys
+            .iter()
+            .enumerate()
+            .flat_map(|(i, _)| {
+                properties.iter().map(move |property| json!({"layer": layer, "prop": property, "time": format!("${}.layerTime", i.saturating_add(1))}))
+            })
+            .collect();
+        steps.push(json!({"command": "keys.select", "params": {"keys": sel}}));
+        steps.push(json!({"command": command, "params": params}));
     }
+    let batch = b.exec("engine.batch", json!({"steps": steps, "label": "Add Keyframes"}))?;
+    let timings: Vec<Value> = batch
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Other("keyframe batch did not return its results".into()))?
+        .iter()
+        .take(keys.len())
+        .cloned()
+        .collect();
+    let mut info = b.exec("prop.get", obj(&base))?;
+    if let [timing] = timings.as_slice() {
+        copy_key_timing(&mut info, timing);
+    }
+    let warnings: Vec<&str> = timings.iter().filter_map(|k| k.get("warning").and_then(Value::as_str)).collect();
+    if !warnings.is_empty() {
+        info["warning"] = json!(warnings.join(" "));
+    }
+    info["timeBase"] = time_base;
+    info["addedKeys"] = json!(timings);
     json_reply(info)
 }
 
@@ -551,7 +608,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_property",
-        description: "Read one property: type, value at `time` (comp seconds; default the current time), whether it is animated, its keyframes (time, value, in/out interpolation) and expression.",
+        description: "Read one property: type, value at `time` (comp seconds; default the current time), whether it is animated, its keyframes (layer time, compTime, value, in/out interpolation) and expression.",
         bridge_only: false,
         schema: || {
             schema(
@@ -563,13 +620,14 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "set_property",
-        description: "Set a property. Without `time`: sets the static value (or a key at the current time if already animated). With `time`: adds/replaces a keyframe there, turning the stopwatch on. `expression` sets an After Effects-style JS expression (\"\" removes it). Returns the property as get_property does. Examples: {\"layer\":3,\"path\":\"transform/opacity\",\"value\":50}; {\"layer\":\"Title\",\"path\":\"transform/position\",\"value\":[200,540],\"time\":0}; {\"layer\":3,\"path\":\"transform/rotation\",\"expression\":\"time*90\"}.",
+        description: "Set a property. Without `time`: sets the static value (or a key at the current time if already animated). With `time`: adds/replaces a keyframe there, turning the stopwatch on. Explicit times use layer seconds by default; `timeBase: comp` uses comp seconds. Returns actual `compTime` and a warning for keys outside the layer. `expression` sets an After Effects-style JS expression (\"\" removes it). Returns the property as get_property does. Examples: {\"layer\":3,\"path\":\"transform/opacity\",\"value\":50}; {\"layer\":\"Title\",\"path\":\"transform/position\",\"value\":[200,540],\"time\":0}; {\"layer\":3,\"path\":\"transform/rotation\",\"expression\":\"time*90\"}.",
         bridge_only: false,
         schema: || {
             schema(
                 json!({
                     "layer": layer_s(), "path": path_s(), "value": value_s(), "comp": comp_s(),
-                    "time": {"type": "number", "description": "Keyframe time in seconds (layer time; equals comp time unless the layer is offset/stretched)."},
+                    "time": {"type": "number", "description": "Keyframe seconds in timeBase (default layer time)."},
+                    "timeBase": {"type": "string", "enum": ["layer", "comp"], "description": "Time base for explicit keyframe times (default layer)."},
                     "expression": {"type": "string", "description": "Expression text; empty string removes the expression."}
                 }),
                 &["layer", "path"],
@@ -579,15 +637,16 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "add_keyframe",
-        description: "Add keyframes to a property (turns the stopwatch on): one with `time` (+ optional `value`, default the current value) or many with `keys: [{time, value}]`, then optionally set their `interpolation`: linear, bezier, hold, easyEase, easyEaseIn, easyEaseOut. Example: {\"layer\":1,\"path\":\"transform/position\",\"keys\":[{\"time\":0,\"value\":[0,540]},{\"time\":2,\"value\":[1920,540]}],\"interpolation\":\"easyEase\"}.",
+        description: "Add keyframes to a property in one undo step (turns the stopwatch on). A failing key or interpolation leaves nothing applied. Explicit times use layer seconds by default; `timeBase: comp` uses comp seconds. Replies include actual `compTime` and warnings for keys outside the layer. Add one with `time` (+ optional `value`, default the current value) or many with `keys: [{time, value}]`, then optionally set their `interpolation`: linear, bezier, hold, easyEase, easyEaseIn, easyEaseOut. Example: {\"layer\":1,\"path\":\"transform/position\",\"keys\":[{\"time\":0,\"value\":[0,540]},{\"time\":2,\"value\":[1920,540]}],\"interpolation\":\"easyEase\"}.",
         bridge_only: false,
         schema: || {
             schema(
                 json!({
                     "layer": layer_s(), "path": path_s(), "comp": comp_s(),
-                    "time": {"type": "number", "description": "Key time in seconds (layer time)."},
+                    "time": {"type": "number", "description": "Key seconds in timeBase (default layer time)."},
                     "value": value_s(),
-                    "keys": {"type": "array", "items": {"type": "object", "properties": {"time": {"type": "number"}, "value": value_s()}, "required": ["time"]}, "description": "Several keys at once."},
+                    "keys": {"type": "array", "items": {"type": "object", "properties": {"time": {"type": "number", "description": "Key seconds in timeBase (default layer time)."}, "value": value_s()}, "required": ["time"]}, "description": "Several keys at once, all using timeBase."},
+                    "timeBase": {"type": "string", "enum": ["layer", "comp"], "description": "Time base for time and every keys[].time (default layer)."},
                     "interpolation": {"type": "string", "enum": ["linear", "bezier", "hold", "easyEase", "easyEaseIn", "easyEaseOut"]}
                 }),
                 &["layer", "path"],

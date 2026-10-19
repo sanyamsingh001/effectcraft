@@ -184,7 +184,12 @@ impl Primitive {
     /// Split every triangle into its own vertices with a face normal (glTF: flat normals when a
     /// primitive has none).
     pub fn flat_normals(&mut self) {
-        let mut p = Primitive { material: self.material, ..Default::default() };
+        self.flat_normals_reserved(Primitive::default());
+    }
+
+    /// Use buffers reserved by an importer that has already bounded the expanded geometry.
+    pub(crate) fn flat_normals_reserved(&mut self, mut p: Primitive) {
+        p.material = self.material;
         for t in self.indices.as_chunks::<3>().0 {
             let (a, b, c) = (self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize]);
             let f = normalize(cross(sub(b, a), sub(c, a))).unwrap_or([0.0, 0.0, 1.0]);
@@ -211,8 +216,16 @@ impl Primitive {
         if self.uvs.len() != n || self.normals.len() != n {
             return;
         }
-        let mut tan = vec![[0.0f32; 3]; n];
-        let mut bit = vec![[0.0f32; 3]; n];
+        self.compute_tangents_reserved(vec![[0.0f32; 3]; n], vec![[0.0f32; 3]; n], Vec::with_capacity(n));
+    }
+
+    /// Use bounded scratch and output buffers, while retaining the public helper for models
+    /// generated in memory.
+    pub(crate) fn compute_tangents_reserved(&mut self, mut tan: Vec<[f32; 3]>, mut bit: Vec<[f32; 3]>, mut tangents: Vec<[f32; 4]>) {
+        let n = self.positions.len();
+        if self.uvs.len() != n || self.normals.len() != n || tan.len() != n || bit.len() != n {
+            return;
+        }
         for t in self.indices.as_chunks::<3>().0 {
             let (i0, i1, i2) = (t[0] as usize, t[1] as usize, t[2] as usize);
             let (p0, p1, p2) = (self.positions[i0], self.positions[i1], self.positions[i2]);
@@ -234,17 +247,16 @@ impl Primitive {
                 }
             }
         }
-        self.tangents = (0..n)
-            .map(|i| {
-                let nn = self.normals[i];
-                let t = tan[i];
-                let d = dot(nn, t);
-                let o = [t[0] - nn[0] * d, t[1] - nn[1] * d, t[2] - nn[2] * d];
-                let o = normalize(o).unwrap_or_else(|| any_perpendicular(nn));
-                let w = if dot(cross(nn, o), bit[i]) < 0.0 { -1.0 } else { 1.0 };
-                [o[0], o[1], o[2], w]
-            })
-            .collect();
+        tangents.extend((0..n).map(|i| {
+            let nn = self.normals[i];
+            let t = tan[i];
+            let d = dot(nn, t);
+            let o = [t[0] - nn[0] * d, t[1] - nn[1] * d, t[2] - nn[2] * d];
+            let o = normalize(o).unwrap_or_else(|| any_perpendicular(nn));
+            let w = if dot(cross(nn, o), bit[i]) < 0.0 { -1.0 } else { 1.0 };
+            [o[0], o[1], o[2], w]
+        }));
+        self.tangents = tangents;
     }
     /// Axis-aligned bounds of the positions.
     pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {

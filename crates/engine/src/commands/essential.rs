@@ -118,8 +118,10 @@ fn add_property(s: &mut Session, p: &Value) -> Result<Value> {
         if control_type(pr).is_none() {
             return Err(bad(C, format!("`{}` can't be added to Essential Graphics (unsupported property type)", pr.name)));
         }
-        // The natural control needs no `as`.
-        let as_type = as_type.filter(|t| control_type(pr) != Some(*t));
+        // New implicit Transform Scale controls use proportional components; old controls
+        // and explicit "as" requests keep their existing representation.
+        let scale_linked = (as_type.is_none() && l.props.prop("transform/scale").is_some_and(|scale| scale.uid == *uid)).then_some(true);
+        let as_type = as_type.or(scale_linked.map(|_| ControlType::Scale)).filter(|t| control_type(pr) != Some(*t));
         if let Some(t) = as_type
             && !essential::can_show_as(pr, t)
         {
@@ -127,28 +129,35 @@ fn add_property(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let eg = s.project.comp(*cid).and_then(|c| c.essential.as_ref());
         let existing = eg
-            .and_then(|e| e.control_for_as(*lid, *uid, as_type).or_else(|| as_type.is_none().then(|| e.driver_of(*lid, *uid)).flatten()))
+            .and_then(|e| {
+                e.control_for_as(*lid, *uid, as_type).or_else(|| {
+                    e.driver_of(*lid, *uid).filter(|driver| {
+                        as_type.is_none()
+                            || (scale_linked.is_some() && matches!(&driver.kind, EgKind::Property { layer, prop, .. } if layer != lid || prop != uid))
+                    })
+                })
+            })
             .map(|c| (c.id, c.name.clone()));
-        let (kind, as_type) = match existing {
+        let (kind, as_type, scale_linked) = match existing {
             Some(_) if !mirror => continue,
-            Some((of, _)) => (EgKind::Mirror { of }, None),
-            None => (EgKind::Property { layer: *lid, prop: *uid, links: vec![] }, as_type),
+            Some((of, _)) => (EgKind::Mirror { of }, None, None),
+            None => (EgKind::Property { layer: *lid, prop: *uid, links: vec![] }, as_type, scale_linked),
         };
         let name = rename.clone().or(existing.map(|e| e.1)).unwrap_or_else(|| match as_type {
             Some(ControlType::Font) => format!("{} Font", l.name),
             _ => pr.name.clone(),
         });
-        added.push((*cid, kind, name, as_type));
+        added.push((*cid, kind, name, as_type, scale_linked));
     }
     let ids = s.edit("Add Property to Essential Graphics", None, |proj, st| {
         if let Some((cid, ..)) = added.first() {
             st.essential_primary.get_or_insert(*cid);
         }
         let mut ids = vec![];
-        for (k, (cid, kind, name, as_type)) in added.iter().enumerate() {
+        for (k, (cid, kind, name, as_type, scale_linked)) in added.iter().enumerate() {
             let id = proj.alloc();
             let eg = eg_of(proj, *cid)?;
-            let ctl = EgControl { id, name: name.clone(), kind: kind.clone(), as_type: *as_type };
+            let ctl = EgControl { id, name: name.clone(), kind: kind.clone(), as_type: *as_type, scale_linked: *scale_linked };
             insert(eg, ctl, group, index.map(|i| i + k), C)?;
             ids.push(id);
         }
@@ -157,6 +166,35 @@ fn add_property(s: &mut Session, p: &Value) -> Result<Value> {
     let mirrors: Vec<u64> = ids.iter().zip(&added).filter(|(_, a)| matches!(a.1, EgKind::Mirror { .. })).map(|(i, _)| *i).collect();
     Ok(json!({"controls": ids, "mirrors": mirrors}))
 }
+/// Change the proportional editor mode without changing any source or override value.
+fn set_scale_linked(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "essential.setScaleLinked";
+    let cid = eg_comp(s, p)?;
+    let id = control_p(s, cid, p, C)?;
+    let linked = b_p(p, "linked").ok_or_else(|| bad(C, "linked: true|false"))?;
+    let master = s
+        .project
+        .comp(cid)
+        .and_then(|comp| comp.essential.as_ref())
+        .and_then(|eg| eg.resolve(id))
+        .filter(|control| control.as_type == Some(ControlType::Scale) && control.scale_linked.is_some())
+        .map(|control| control.id)
+        .ok_or_else(|| bad(C, "the control does not have proportional Scale components"))?;
+    s.edit("Constrain Scale Proportions", None, |proj, _| {
+        let control = eg_of(proj, cid)?.find_mut(master).ok_or_else(|| bad(C, "the control no longer exists"))?;
+        control.scale_linked = Some(linked);
+        Ok(())
+    })?;
+    Ok(json!({"comp": cid.0, "control": master, "linked": linked}))
+}
+
+fn scale_mode_json(mut value: Value, linked: Option<bool>) -> Value {
+    if let Some(linked) = linked {
+        value["scaleLinked"] = json!(linked);
+    }
+    value
+}
+
 /// Add a mirror of a property control (the same property shown again, e.g. in another group).
 fn add_mirror(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "essential.addMirror";
@@ -171,7 +209,7 @@ fn add_mirror(s: &mut Session, p: &Value) -> Result<Value> {
     let index = p.get("index").and_then(Value::as_u64).map(|i| i as usize);
     let id = s.edit("Add Mirror to Essential Graphics", None, |proj, _| {
         let id = proj.alloc();
-        insert(eg_of(proj, cid)?, EgControl { id, name, kind: EgKind::Mirror { of }, as_type: None }, group, index, C)?;
+        insert(eg_of(proj, cid)?, EgControl { id, name, kind: EgKind::Mirror { of }, as_type: None, scale_linked: None }, group, index, C)?;
         Ok(id)
     })?;
     Ok(json!({"control": id, "of": of}))
@@ -297,7 +335,7 @@ fn add_media(s: &mut Session, p: &Value) -> Result<Value> {
         if eg.flat().iter().any(|c| matches!(c.kind, EgKind::Media { layer } if layer == lid)) {
             return Err(bad(C, "this layer already has a Media Replacement control"));
         }
-        insert(eg, EgControl { id, name, kind: EgKind::Media { layer: lid }, as_type: None }, group, None, C)?;
+        insert(eg, EgControl { id, name, kind: EgKind::Media { layer: lid }, as_type: None, scale_linked: None }, group, None, C)?;
         Ok(id)
     })?;
     Ok(json!({"control": id}))
@@ -310,7 +348,13 @@ fn add_group(s: &mut Session, p: &Value) -> Result<Value> {
     let id = s.edit("Add Essential Graphics Group", None, |proj, st| {
         st.essential_primary.get_or_insert(cid);
         let id = proj.alloc();
-        insert(eg_of(proj, cid)?, EgControl { id, name, kind: EgKind::Group { children: vec![] }, as_type: None }, None, index, "essential.addGroup")?;
+        insert(
+            eg_of(proj, cid)?,
+            EgControl { id, name, kind: EgKind::Group { children: vec![] }, as_type: None, scale_linked: None },
+            None,
+            index,
+            "essential.addGroup",
+        )?;
         Ok(id)
     })?;
     Ok(json!({"control": id}))
@@ -325,7 +369,7 @@ fn add_comment(s: &mut Session, p: &Value) -> Result<Value> {
         let id = proj.alloc();
         insert(
             eg_of(proj, cid)?,
-            EgControl { id, name: "Comment".into(), kind: EgKind::Comment { text }, as_type: None },
+            EgControl { id, name: "Comment".into(), kind: EgKind::Comment { text }, as_type: None, scale_linked: None },
             group,
             None,
             "essential.addComment",
@@ -477,7 +521,7 @@ pub fn supported_properties(project: &Project, cid: ItemId) -> Vec<Value> {
     let mut out = vec![];
     for l in &c.layers {
         l.props.walk("", &mut |_, pr| {
-            if pr.three_d_only && !l.is_3d() {
+            if (pr.three_d_only && !l.is_3d()) || (pr.two_d_only && l.is_3d()) {
                 return;
             }
             if let Some(t) = essential::control_type(pr) {
@@ -500,32 +544,38 @@ fn control_json(project: &Project, cid: ItemId, c: &EgControl) -> Value {
                 .into_iter()
                 .map(|(l, pr)| json!({"layer": l.id.0, "layerName": l.name, "prop": pr.uid, "path": super::match_path_of(&l.props, pr.uid)}))
                 .collect();
-            json!({
-                "id": c.id, "name": c.name, "kind": "property", "layer": layer.0, "prop": prop,
-                "layerName": src.map(|(l, _)| l.name.clone()),
-                "path": src.and_then(|(l, _)| super::match_path_of(&l.props, *prop)),
-                "type": src.and_then(|(_, pr)| essential::effective_type(c, pr)),
-                "value": src.map(|(_, pr)| value_json(essential::effective_type(c, pr), &pr.value_at(Tick::ZERO))),
-                "missing": src.is_none(),
-                "links": links,
-                "mirrors": project.comp(cid).and_then(|c| c.essential.as_ref()).map(|e| e.mirrors_of(c.id)).unwrap_or_default(),
-            })
+            scale_mode_json(
+                json!({
+                    "id": c.id, "name": c.name, "kind": "property", "layer": layer.0, "prop": prop,
+                    "layerName": src.map(|(l, _)| l.name.clone()),
+                    "path": src.and_then(|(l, _)| super::match_path_of(&l.props, *prop)),
+                    "type": src.and_then(|(_, pr)| essential::effective_type(c, pr)),
+                    "value": src.map(|(_, pr)| value_json(essential::effective_type(c, pr), &pr.value_at(Tick::ZERO))),
+                    "missing": src.is_none(),
+                    "links": links,
+                    "mirrors": project.comp(cid).and_then(|c| c.essential.as_ref()).map(|e| e.mirrors_of(c.id)).unwrap_or_default(),
+                }),
+                c.scale_linked,
+            )
         }
         EgKind::Mirror { of } => {
             // Shown as its master (same kind of control).
             let master = project.comp(cid).and_then(|x| x.essential.as_ref()).and_then(|e| e.resolve(c.id)).cloned();
             let src = essential::source_prop(project, cid, c);
             let ty = |pr| master.as_ref().and_then(|m| essential::effective_type(m, pr));
-            json!({
-                "id": c.id, "name": c.name, "kind": "mirror", "of": of,
-                "layer": src.map(|(l, _)| l.id.0),
-                "prop": src.map(|(_, pr)| pr.uid),
-                "layerName": src.map(|(l, _)| l.name.clone()),
-                "path": src.and_then(|(l, pr)| super::match_path_of(&l.props, pr.uid)),
-                "type": src.and_then(|(_, pr)| ty(pr)),
-                "value": src.map(|(_, pr)| value_json(ty(pr), &pr.value_at(Tick::ZERO))),
-                "missing": src.is_none(),
-            })
+            scale_mode_json(
+                json!({
+                    "id": c.id, "name": c.name, "kind": "mirror", "of": of,
+                    "layer": src.map(|(l, _)| l.id.0),
+                    "prop": src.map(|(_, pr)| pr.uid),
+                    "layerName": src.map(|(l, _)| l.name.clone()),
+                    "path": src.and_then(|(l, pr)| super::match_path_of(&l.props, pr.uid)),
+                    "type": src.and_then(|(_, pr)| ty(pr)),
+                    "value": src.map(|(_, pr)| value_json(ty(pr), &pr.value_at(Tick::ZERO))),
+                    "missing": src.is_none(),
+                }),
+                master.as_ref().and_then(|control| control.scale_linked),
+            )
         }
         EgKind::Media { layer } => json!({
             "id": c.id, "name": c.name, "kind": "media", "type": "media", "layer": layer.0,
@@ -604,14 +654,20 @@ fn instance_json(s: &mut Session, p: &Value) -> Result<Value> {
             EgKind::Comment { .. } => "comment",
             EgKind::Group { .. } => "group",
         };
-        out.push(json!({
-            "control": c.id, "name": c.name, "kind": kind,
-            "uid": pr.as_ref().map(|x| x.uid),
-            "path": pr.as_ref().and_then(|x| super::match_path_of(&l.props, x.uid)),
-            "value": pr.as_ref().map(|x| value_json(essential::effective_type(c, x), &x.value_at(l.layer_time(t)))),
-            "type": pr.as_ref().and_then(|x| essential::effective_type(c, x)).or((kind == "media").then_some(ControlType::Media)),
-            "overridden": pr.as_ref().is_some_and(|x| over.contains(&x.uid)),
-        }));
+        let master = eg.resolve(c.id).unwrap_or(c);
+        // The new component mode follows its master; legacy instance JSON keeps its type.
+        let shown = if master.scale_linked.is_some() { master } else { c };
+        out.push(scale_mode_json(
+            json!({
+                "control": c.id, "name": c.name, "kind": kind,
+                "uid": pr.as_ref().map(|x| x.uid),
+                "path": pr.as_ref().and_then(|x| super::match_path_of(&l.props, x.uid)),
+                "value": pr.as_ref().map(|x| value_json(essential::effective_type(shown, x), &x.value_at(l.layer_time(t)))),
+                "type": pr.as_ref().and_then(|x| essential::effective_type(shown, x)).or((kind == "media").then_some(ControlType::Media)),
+                "overridden": pr.as_ref().is_some_and(|x| over.contains(&x.uid)),
+            }),
+            master.scale_linked,
+        ));
     }
     Ok(json!({"layer": lid.0, "comp": src.0, "name": eg.name, "controls": out}))
 }
@@ -998,6 +1054,7 @@ pub fn specs() -> Vec<CommandSpec> {
             add_property
         ),
         cmd!("essential.addMirror", "Add Mirror", [], None, "{comp?, control, name?, group?, index?}", has_eg, add_mirror),
+        cmd!("essential.setScaleLinked", "Constrain Scale Proportions", [], None, "{comp?, control: id|name, linked: bool}", has_eg, set_scale_linked),
         cmd!(
             "essential.linkProperty",
             "Link Property to Control",

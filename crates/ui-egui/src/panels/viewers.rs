@@ -6,7 +6,7 @@
 //! the active viewer is locked shows it in an unlocked viewer, or in a new one if every viewer is
 //! locked.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use effectcraft_engine::project::ItemId;
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
@@ -226,7 +226,15 @@ pub fn new_viewer(app: &mut EffectcraftApp) -> u32 {
 
 /// Dock a new viewer panel as a tab next to viewer `near`.
 fn add_viewer(app: &mut EffectcraftApp, near: u32) -> u32 {
-    let id = app.ui.viewers.keys().copied().max().unwrap_or(0).saturating_add(1).max(1);
+    // Workspace layouts restore panel IDs before their viewer documents are created.
+    let mut panels = Vec::new();
+    app.ui.dock.panels(&mut panels);
+    panels.extend(app.ui.floating.iter().flat_map(|f| f.panels.iter()).copied());
+    let ids: BTreeSet<u32> = app.ui.viewers.keys().copied().chain(panels.into_iter().filter_map(id_of)).collect();
+    let mut id = ids.last().copied().unwrap_or(0).saturating_add(1).max(1);
+    while ids.contains(&id) {
+        id = id.checked_add(1).unwrap_or(1);
+    }
     app.ui.viewers.insert(id, None);
     let p = panel(id);
     let anchor = if app.ui.dock.contains(panel(near)) { panel(near) } else { PanelKind::Composition };

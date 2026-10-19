@@ -524,3 +524,76 @@ fn comp_preserves_nested_frame_rate_and_resolution() {
     let (_, c) = comp_named(&s, "Nested");
     assert!(c.preserve_frame_rate && c.preserve_resolution);
 }
+
+#[test]
+fn mesh_warp_scripts_and_expressions_read_the_interpolated_mesh() {
+    use effectcraft_engine::effects::WarpMesh;
+    let mut s = session();
+    s.execute("comp.new", json!({"name": "Mesh", "width": 320, "height": 180, "frameRate": 24, "duration": 2})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"name": "Solid", "color": "#6080a0"})).unwrap()["layer"].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layers": [layer], "effect": "Mesh Warp"})).unwrap()["effects"][0].as_u64().unwrap();
+    let cid = s.state.active_comp.unwrap();
+    let g = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find_group(fx).unwrap();
+    let (rows, columns, mesh) = (g.get("rows").unwrap().uid, g.get("columns").unwrap().uid, g.get("mesh").unwrap().uid);
+    for prop in [rows, columns] {
+        s.execute("prop.set", json!({"layer": layer, "prop": prop, "value": 1})).unwrap();
+    }
+    s.execute("prop.addKey", json!({"layer": layer, "prop": mesh, "time": 0, "value": ""})).unwrap();
+    s.execute("prop.addKey", json!({"layer": layer, "prop": mesh, "time": 1, "value": "20,10 20,10 20,10 20,10"})).unwrap();
+    s.execute("time.set", json!({"time": 0.5})).unwrap();
+    let o = ok(
+        &mut s,
+        r#"
+        var mesh = app.project.activeItem.layer(1).Effects.property(1).property("Distortion Mesh");
+        [mesh.value, mesh.valueAtTime(0.5, true), mesh.valueAtTime(0.5, false)]
+    "#,
+    );
+    for value in o.result.as_array().unwrap() {
+        assert_eq!(WarpMesh::parse(value.as_str().unwrap(), 1, 1).controls[0][0], [10.0, 5.0]);
+    }
+    let value = effectcraft_expr::eval_standalone(
+        &s.project,
+        cid,
+        effectcraft_engine::project::LayerId(layer),
+        "effects/#1/mesh",
+        "thisLayer.effect('Mesh Warp')('Distortion Mesh').valueAtTime(0.5, true)",
+        0.5,
+    )
+    .unwrap();
+    let KV::Str(text) = value else { panic!("expected mesh data") };
+    assert_eq!(WarpMesh::parse(&text, 1, 1).controls[0][0], [10.0, 5.0]);
+    for value in [
+        effectcraft_expr::eval_standalone(&s.project, cid, effectcraft_engine::project::LayerId(layer), "effects/#1/mesh", "value", 0.5).unwrap(),
+        effectcraft_expr::eval_property(&s.project, cid, effectcraft_engine::project::LayerId(layer), "effects/#1/mesh", 0.5).unwrap(),
+    ] {
+        let KV::Str(text) = value else { panic!("expected mesh data") };
+        assert_eq!(WarpMesh::parse(&text, 1, 1).controls[0][0], [10.0, 5.0]);
+    }
+}
+
+#[test]
+fn mesh_warp_interpolation_uses_expression_driven_grid_dimensions() {
+    use effectcraft_engine::effects::WarpMesh;
+    let mut s = session();
+    s.execute("comp.new", json!({"name": "Mesh", "width": 320, "height": 180, "frameRate": 24, "duration": 2})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"name": "Solid", "color": "#6080a0"})).unwrap()["layer"].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layers": [layer], "effect": "Mesh Warp"})).unwrap()["effects"][0].as_u64().unwrap();
+    let g = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find_group(fx).unwrap();
+    let (rows, columns, mesh) = (g.get("rows").unwrap().uid, g.get("columns").unwrap().uid, g.get("mesh").unwrap().uid);
+    for prop in [rows, columns] {
+        s.execute("prop.setExpression", json!({"layer": layer, "prop": prop, "expression": "3"})).unwrap();
+    }
+    let mut warped = WarpMesh::identity(3, 3);
+    warped.controls[5][0] = [50.0, 0.0];
+    s.execute("prop.addKey", json!({"layer": layer, "prop": mesh, "time": 0, "value": ""})).unwrap();
+    s.execute("prop.addKey", json!({"layer": layer, "prop": mesh, "time": 1, "value": warped.format()})).unwrap();
+    let query = s.execute("prop.get", json!({"layer": layer, "prop": mesh, "time": 0.5})).unwrap();
+    assert_eq!(WarpMesh::parse(query["value"].as_str().unwrap(), 3, 3).controls[5][0], [25.0, 0.0]);
+    let cid = s.state.active_comp.unwrap();
+    let comp = s.project.comp(cid).unwrap();
+    let layer = comp.layer(effectcraft_engine::project::LayerId(layer)).unwrap();
+    let mut ctx = effectcraft_engine::render::EvalCtx::new(&s.project, cid, comp, effectcraft_engine::time::Tick::from_seconds_f64(0.5));
+    ctx.expr = s.expr.as_deref();
+    let KV::Str(rendered) = ctx.value(layer, layer.props.find(mesh).unwrap()) else { panic!("expected mesh data") };
+    assert_eq!(WarpMesh::parse(&rendered, 3, 3).controls[5][0], [25.0, 0.0]);
+}

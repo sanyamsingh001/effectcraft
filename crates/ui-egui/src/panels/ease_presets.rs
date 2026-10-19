@@ -6,7 +6,7 @@
 //! selected user preset. Every action is a `keys.easePreset.*` command.
 //!
 //! Automation ids: `easePresets.graph`, `easePresets.handle.out` / `.in`, `easePresets.apply`,
-//! `easePresets.fromKeys`, `easePresets.name`, `easePresets.save`, `easePresets.rename`,
+//! `easePresets.influence`, `easePresets.fromKeys`, `easePresets.name`, `easePresets.save`, `easePresets.rename`,
 //! `easePresets.delete`, `easePresets.preset.<n>` (1-based, labelled with the preset's name).
 
 use effectcraft_engine::ease_presets;
@@ -44,8 +44,8 @@ const V_MAX: f64 = 1.35;
 const TILE: egui::Vec2 = vec2(84.0, 64.0);
 const GAP: f32 = 6.0;
 const ROW: f32 = 30.0;
-/// Height of the controls under the graph (numbers, three button rows, status, "Presets").
-const CONTROLS: f32 = 154.0;
+/// Height of the controls under the graph (influence, numbers, three button rows, status, "Presets").
+const CONTROLS: f32 = 184.0;
 /// Panels at least this wide put the presets beside the graph and controls.
 const SIDE_BY_SIDE: f32 = 560.0;
 
@@ -73,14 +73,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let room = rect.height() - 16.0 - CONTROLS - if side { 0.0 } else { TILE.y + GAP };
     let g = Rect::from_min_size(pos2(x0, rect.min.y + 10.0), vec2(w, (w * 0.6).min(room).clamp(90.0, 220.0)));
     graph(app, ui, g, &mut st.curve);
-    let c = st.curve;
     let mut y = g.max.y + 4.0;
+    influence_slider(app, ui, &p, Rect::from_min_size(pos2(x0, y), vec2(w, 24.0)), &mut st.curve);
+    y += ROW;
+    let c = st.curve;
     let numbers = format!("Out {:.1} % · {:.2}      In {:.1} % · {:.2}", c.out_influence, c.out_speed, c.in_influence, c.in_speed);
     p.text(pos2(x0, y + 8.0), Align2::LEFT_CENTER, numbers, Tokens::mono(11.0), t.text_faint);
     y += 22.0;
     let at = |x: f32, y: f32, width: f32| Rect::from_min_size(pos2(x, y), vec2(width, 24.0));
     if kit::button(app, ui, at(x0, y, 90.0), "easePresets.apply", "Apply", pairs > 0) {
-        apply(app, json!({"curve": c}), pairs, "the curve");
+        apply(app, ui.ctx(), json!({"curve": c}), pairs, "the curve");
     }
     if kit::button(app, ui, at(x0 + 96.0, y, 100.0), "easePresets.fromKeys", "From Keys", false)
         && let Some(v) = kit::exec(app, "keys.easePreset.capture", json!({}))
@@ -137,7 +139,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some((name, curve)) = grid(app, ui, list, st.selected.as_deref()) {
         st.curve = curve;
         if pairs > 0 {
-            apply(app, json!({"preset": name}), pairs, &format!("“{name}”"));
+            apply(app, ui.ctx(), json!({"preset": name}), pairs, &format!("“{name}”"));
         }
         st.selected = Some(name);
     }
@@ -146,11 +148,45 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 }
 
-fn apply(app: &mut EffectcraftApp, params: serde_json::Value, pairs: usize, what: &str) {
+fn apply(app: &mut EffectcraftApp, ctx: &egui::Context, params: serde_json::Value, pairs: usize, what: &str) {
     if pairs == 0 {
         app.ui.status = "Select two or more neighbouring keyframes of a property".into();
-    } else if let Some(r) = kit::exec(app, "keys.easePreset.apply", params) {
-        app.ui.status = format!("Eased {} keyframe pair(s) with {what}", r["pairs"]);
+    } else {
+        match crate::menus::invoke(app, ctx, "keys.easePreset.apply", params) {
+            Ok(result) => app.ui.status = format!("Eased {} keyframe pair(s) with {what}", result["pairs"]),
+            Err(error) => app.ui.status = error,
+        }
+    }
+}
+
+/// Symmetric easing with zero endpoint speed; zero keeps the exact Linear curve.
+fn influence_curve(amount: f64) -> EaseCurve {
+    let amount = if amount.is_finite() { amount.clamp(0.0, 100.0) } else { 0.0 };
+    if amount == 0.0 {
+        EaseCurve::LINEAR
+    } else {
+        let influence = amount.max(0.1);
+        EaseCurve { out_influence: influence, out_speed: 0.0, in_influence: influence, in_speed: 0.0 }
+    }
+}
+
+fn influence_slider(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, curve: &mut EaseCurve) {
+    let t = app.tokens;
+    let amount = if curve.out_speed == 1.0 && curve.in_speed == 1.0 { 0.0 } else { ((curve.out_influence + curve.in_influence) * 0.5).clamp(0.0, 100.0) };
+    p.text(pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, "Influence", Tokens::ui(11.0), t.text_dim);
+    p.text(pos2(r.max.x, r.center().y), Align2::RIGHT_CENTER, format!("{amount:.1} %"), Tokens::mono(11.0), t.text_dim);
+    let tr = Rect::from_min_max(pos2(r.min.x + 70.0, r.min.y + 10.0), pos2(r.max.x - 48.0, r.min.y + 14.0));
+    p.rect_filled(tr, 2.0, t.field_bg);
+    let x = tr.min.x + tr.width() * (amount / 100.0) as f32;
+    p.rect_filled(Rect::from_min_max(tr.min, pos2(x, tr.max.y)), 2.0, t.accent.gamma_multiply(0.7));
+    p.circle_filled(pos2(x, tr.center().y), 5.0, t.text);
+    let resp = ui.interact(tr.expand2(vec2(4.0, 6.0)), egui::Id::new("easePresets-influence"), Sense::click_and_drag());
+    app.auto.add("easePresets.influence", tr, "Influence");
+    if (resp.clicked() || resp.dragged())
+        && let Some(pt) = resp.interact_pointer_pos()
+    {
+        let amount = f64::from(((pt.x - tr.min.x) / tr.width()).clamp(0.0, 1.0)) * 100.0;
+        *curve = influence_curve(amount);
     }
 }
 
@@ -240,4 +276,56 @@ fn grid(app: &mut EffectcraftApp, ui: &mut egui::Ui, list: Rect, selected: Optio
     }
     scroll.end(ui, &mut app.auto, "easePresets.scroll", count.div_ceil(cols) as f32 * (TILE.y + GAP), &t);
     clicked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::influence_curve;
+    use effectcraft_engine::keyframe::{EaseCurve, ease_progress};
+
+    fn progress(amount: f64, x: f64) -> f64 {
+        let c = influence_curve(amount);
+        ease_progress(c.out_speed, c.out_influence / 100.0, c.in_speed, c.in_influence / 100.0, x)
+    }
+
+    #[test]
+    fn symmetric_influence_is_bounded_and_zero_is_exact_linear() {
+        for amount in [0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN] {
+            assert_eq!(influence_curve(amount), EaseCurve::LINEAR);
+        }
+        assert_eq!(influence_curve(101.0), influence_curve(100.0));
+        assert_eq!(influence_curve(0.01).out_influence, 0.1);
+        for i in 0..=100 {
+            let x = f64::from(i) / 100.0;
+            assert!((progress(0.0, x) - x).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn midpoint_and_full_influence_have_the_expected_curvature() {
+        // Half influence gives handles (0.5, 0) and (0.5, 1). Full influence gives
+        // (1, 0) and (0, 1), with the exact inverse u = 0.5 + cbrt((x - 0.5) / 4).
+        assert!((progress(50.0, 0.25) - 0.10589254302501768).abs() < 1e-10);
+        let u = 0.5 + (-0.0625_f64).cbrt();
+        let full = 3.0 * u * u - 2.0 * u * u * u;
+        assert!((progress(100.0, 0.25) - full).abs() < 1e-12);
+        assert!(progress(100.0, 0.25) < progress(50.0, 0.25));
+    }
+
+    #[test]
+    fn every_slider_curve_is_symmetric_monotone_and_preserves_endpoints() {
+        for amount in [0.0, 0.1, 10.0, 100.0 / 3.0, 50.0, 75.0, 100.0] {
+            assert_eq!(progress(amount, 0.0), 0.0);
+            assert_eq!(progress(amount, 1.0), 1.0);
+            assert!((progress(amount, 0.5) - 0.5).abs() < 1e-12);
+            let mut previous = 0.0;
+            for i in 0..=100 {
+                let x = f64::from(i) / 100.0;
+                let v = progress(amount, x);
+                assert!((v + progress(amount, 1.0 - x) - 1.0).abs() < 1e-10);
+                assert!(v >= previous && v <= 1.0);
+                previous = v;
+            }
+        }
+    }
 }

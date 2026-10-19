@@ -365,6 +365,46 @@ pub(crate) fn comp_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &C
     for (i, m) in comp.markers.iter().enumerate() {
         marker(app, ui, &p, comp, tm, m, m.time.seconds(), MarkerRef { layer: None, index: i }, strip.min.y, strip.max.y);
     }
+    marker_bin(app, ui, comp, tm, strip, rows);
+}
+
+/// Composition markers have their own source, independent of the selected layer.
+fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Comp, tm: TMap, strip: Rect, rows: Rect) {
+    let bin = Rect::from_min_max(pos2(strip.max.x - 18.0, strip.min.y - 10.0), strip.max);
+    let response = ui.interact(bin, egui::Id::new("composition-marker-bin"), Sense::click_and_drag()).on_hover_text("Add composition marker. Drag to place.");
+    app.auto.add("timeline.markerBin", bin, "Add composition marker");
+    let col = if response.hovered() { app.tokens.text } else { app.tokens.text_dim };
+    let center = bin.center();
+    let paint = ui.painter().with_clip_rect(bin);
+    paint.rect_filled(bin, 0.0, app.tokens.panel_bg);
+    paint.add(egui::Shape::convex_polygon(
+        vec![center + vec2(-4.0, -5.0), center + vec2(4.0, -5.0), center + vec2(4.0, 0.0), center + vec2(0.0, 5.0), center + vec2(-4.0, 0.0)],
+        col,
+        Stroke::NONE,
+    ));
+    let target = ui.input(|i| i.pointer.latest_pos()).filter(|pt| pt.x >= strip.min.x && pt.x < bin.min.x && pt.y >= bin.min.y && pt.y <= rows.max.y);
+    let time = target.map(|pt| {
+        snap(app, comp, tm, tm.t(pt.x).clamp(0.0, comp.duration.seconds()), MarkerRef { layer: None, index: usize::MAX }).clamp(0.0, comp.duration.seconds())
+    });
+    if response.dragged()
+        && let (Some(pt), Some(time)) = (target, time)
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        ui.painter().line_segment([pos2(tm.x(time), strip.min.y), pos2(tm.x(time), rows.max.y)], Stroke::new(1.0, app.tokens.accent));
+        ui.painter().text(pt + vec2(12.0, 12.0), Align2::LEFT_TOP, super::timecode(&app.session, comp, Tick::from_seconds_f64(time)), Tokens::ui(11.0), col);
+    }
+    let add_at = if response.clicked() {
+        Some(app.session.time().seconds())
+    } else if response.drag_stopped() && ui.input(|i| i.pointer.primary_released()) {
+        time
+    } else {
+        None
+    };
+    if let Some(time) = add_at
+        && let Err(error) = app.session.execute("markers.set", json!({"new": true, "time": time}))
+    {
+        app.ui.status = error.to_string();
+    }
 }
 
 /// Layer markers on a layer's row `r`; on a precomp layer, its comp's markers too (read-only,

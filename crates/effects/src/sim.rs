@@ -1085,12 +1085,44 @@ fn particle_world_plan(ctx: &EffectCtx, b: &Buf) -> Option<SpritePlan> {
     let svar = pr.f("particle/sizeVariation") as f32 / 100.0;
     let max_op = pr.f("particle/maxOpacity") as f32 / 100.0;
     let s = b.scale as f32;
+    let camera = ctx.env.host.filter(|h| h.has_active_comp_camera()).and_then(|_| crate::card3d::comp_projection(ctx, b));
     // Camera at distance 2 (world units = layer width) looking at the origin (layer centre).
     let cam = 2.0f32;
     let mut list: Vec<(f32, Sprite)> = st
         .parts
         .par_iter()
         .filter_map(|q| {
+            if let Some(camera) = camera {
+                // The simulation remains in world units of one layer width. The host matrix
+                // already accounts for the layer transform and brings the view back to its grid.
+                let point = [
+                    b.offset[0] + (f64::from(lw) * 0.5 + f64::from(q.p[0]) * f64::from(lw)) * b.scale,
+                    b.offset[1] + (f64::from(lh) * 0.5 + f64::from(q.p[1]) * f64::from(lw)) * b.scale,
+                    f64::from(q.p[2]) * f64::from(lw) * b.scale,
+                ];
+                let row = |i: usize| (0..3).map(|j| camera.m[i][j] * point[j]).sum::<f64>() + camera.m[i][3];
+                let depth = row(2);
+                if !depth.is_finite() || depth <= camera.near {
+                    return None;
+                }
+                let (x, y) = (row(0) / depth, row(1) / depth);
+                // Screen derivatives carry both the billboard size and 3D line velocity through
+                // the same projection, including camera rotation and depth motion.
+                let derivative = |i: usize, screen: f64| std::array::from_fn::<_, 3, _>(|j| (camera.m[i][j] - screen * camera.m[2][j]) / depth);
+                let (dx, dy) = (derivative(0, x), derivative(1, y));
+                let norm = |v: [f64; 3]| v[0].hypot(v[1]).hypot(v[2]);
+                let unit = f64::from(lw) * b.scale;
+                let velocity = |d: [f64; 3]| d.into_iter().zip(q.v).map(|(d, v)| d * f64::from(v)).sum::<f64>() * unit;
+                let (c, size) = particle_look(q, birth, death, bs, ds, svar, max_op);
+                let radius = f64::from(size) * unit * 0.125 * (norm(dx) + norm(dy)) * 0.5;
+                let sp =
+                    type_sprite(kind, x as f32, y as f32, radius as f32, c, velocity(dx) as f32, velocity(dy) as f32, (q.id % 628) as f32 * 0.01 + q.age * 2.0);
+                let line_finite = match sp.shape {
+                    Shape::Line { dx, dy } => dx.is_finite() && dy.is_finite(),
+                    _ => true,
+                };
+                return (sp.x.is_finite() && sp.y.is_finite() && sp.r.is_finite() && line_finite).then_some((depth as f32, sp));
+            }
             let zc = cam + q.p[2];
             if zc <= 0.05 {
                 return None;

@@ -125,6 +125,15 @@ The most important missing piece: it turns every other estimate here into a meas
   `shape_tool_options_paint_new_shapes`, `masks_of_every_shape_tool_kind`,
   `tool_creates_mask_draws_a_mask_on_the_selected_shape_layer` and
   `fill_options_paint_the_next_shape` (Tool Creates Shape / Mask, Fill and Stroke Options).
+- Follow-up regression coverage for the reports of 8–9 October includes synthetic Puppet rest
+  and posed-pin attachment tests (#313, #318), stacked docking pointer tests in `ui_tabs`
+  (#301, #302), Mesh Warp vertex/tangent editing in `ui_fx_editors` and `ui_viewer` (#303),
+  offset-layer command/MCP time-base tests (#257), EXtractoR channel selection in `ui_extractor`
+  (#295), marker-bin gestures in `ui_marker_bin` (#275), and keyboard/viewport menu tests in
+  `ui_menu_keyboard` (#279). Native audio-export regressions inspect actual WAV and AIFF
+  precision. GPU Mesh Warp
+  comparisons require an adapter; these synthetic and Linux checks do not establish behavior
+  on the reporters' other operating systems or graphics devices.
 - Done when: no open bug blocks a basic workflow (import, arrange, animate, preview, render) on
   any of the three desktop platforms, and every bug users report gets triaged within a day.
 

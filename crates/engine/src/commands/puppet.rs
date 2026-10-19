@@ -77,24 +77,34 @@ fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
     let fx_uid = find_puppet(s, cid, lid);
     let want_mesh = p.get("mesh").and_then(Value::as_u64);
     let new_mesh = p.get("newMesh").and_then(Value::as_bool).unwrap_or(false);
-    let mut target: Option<(Uid, [f64; 2])> = None;
+    let mut target: Option<(Uid, [f64; 2], bool)> = None;
     if let Some(fu) = fx_uid
         && !new_mesh
         && let Some((buf, params)) = puppet_eval(s, cid, lid, fu, t)
     {
         let meshes = puppet::overlay(&buf, &params);
-        for (uid, mesh, def, _) in &meshes {
+        for (uid, mesh, def, pins) in &meshes {
             if want_mesh.is_some_and(|w| w != *uid) || mesh.tris.is_empty() {
                 continue;
             }
-            let inside = mesh.tris.iter().any(|tr| {
-                let (a, b, c) = (def[tr[0]], def[tr[1]], def[tr[2]]);
-                let cr = |o: [f64; 2], u: [f64; 2], v: [f64; 2]| (u[0] - o[0]) * (v[1] - o[1]) - (u[1] - o[1]) * (v[0] - o[0]);
-                cr(a, b, at) >= 0.0 && cr(b, c, at) >= 0.0 && cr(c, a, at) >= 0.0
-            });
+            let inside = puppet::contains(mesh, def, at);
             let near = def.iter().map(|v| (v[0] - at[0]).hypot(v[1] - at[1])).fold(f64::MAX, f64::min) < 12.0;
             if inside || near || want_mesh.is_some() {
-                target = Some((*uid, puppet::unmap(mesh, def, at)));
+                let rest = puppet::unmap(mesh, def, at);
+                let attachment = kind == PinKind::Position && inside && def != &mesh.verts;
+                if attachment {
+                    let stored = s
+                        .project
+                        .comp(cid)
+                        .and_then(|c| c.layer(lid))
+                        .and_then(|l| l.props.find_group(*uid))
+                        .map(|group| puppet::pins(group).filter(|pin| pin.get("attachment").is_some_and(|p| p.value.as_bool())).count())
+                        .unwrap_or(0);
+                    if stored >= puppet::MAX_ATTACHMENTS || !puppet::can_attach(mesh, pins, rest) {
+                        return Err(bad(cmd, "Puppet pin attachment is redundant or exceeds 32 attached pins on this mesh"));
+                    }
+                }
+                target = Some((*uid, rest, attachment));
                 break;
             }
         }
@@ -136,19 +146,24 @@ fn add_pin(s: &mut Session, p: &Value) -> Result<Value> {
             }
         };
         let pg = fxg.find_group_mut(fx_uid).ok_or_else(|| bad(cmd, "Puppet effect gone"))?;
-        let (mesh_uid, rest) = match target {
-            Some((m, r)) => (m, r),
+        let (mesh_uid, rest, attachment) = match target {
+            Some((m, r, attachment)) => (m, r, attachment),
             None => {
                 let n = puppet::meshes(pg).count();
                 let g = puppet::mesh_group(&mut ids, &format!("Mesh {}", n + 1), at, &opts);
                 let u = g.uid;
                 pg.children.push(g.into());
-                (u, at)
+                (u, at, false)
             }
         };
         let name = puppet::next_pin_name(pg, kind);
         let mg = pg.find_group_mut(mesh_uid).ok_or_else(|| bad(cmd, "mesh gone"))?;
         let mut pin = puppet::pin_group(&mut ids, &name, kind, rest);
+        if attachment {
+            let mut p = ids.prop("attachment", "attachment", KV::Bool(true)).with_ui(effectcraft_project::ParamUi::Hidden);
+            p.static_only = true;
+            pin.children.push(p.into());
+        }
         if let Some(pos) = pin.get_mut("position") {
             if kind.moves() {
                 pos.value = KV::Vec2(at);

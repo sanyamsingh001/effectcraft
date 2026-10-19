@@ -34,8 +34,17 @@ pub struct Handles {
     /// Hard position constraints (vertex, position).
     pub fixed: Vec<(usize, [f64; 2])>,
     pub edges: Vec<EdgeTarget>,
+    pub points: Vec<PointTarget>,
 }
 
+/// A hard position constraint on a point inside a mesh triangle. Weights are finite,
+/// nonnegative and sum to one; invalid rows are ignored before any vertex access.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PointTarget {
+    pub vertices: [usize; 3],
+    pub weights: [f64; 3],
+    pub position: [f64; 2],
+}
 /// Sparse symmetric matrix in row maps (assembly), then CSR for the solve.
 struct Sparse {
     rows: Vec<BTreeMap<usize, f64>>,
@@ -153,17 +162,41 @@ pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handl
     if n == 0 {
         return vec![];
     }
+    // Validate point rows before every vertex or scalar-row access. Malformed serialized
+    // attachment data does not introduce indexing or non-finite arithmetic into the solve.
+    let points: Vec<_> = h.points.iter().filter(|p| valid_point(p, n)).take(32).collect();
     // Initial guess: rest translated by the mean handle displacement.
     let mut t = [0.0, 0.0];
     for (i, p) in &h.fixed {
         t[0] += p[0] - rest[*i][0];
         t[1] += p[1] - rest[*i][1];
     }
-    if !h.fixed.is_empty() {
-        t[0] /= h.fixed.len() as f64;
-        t[1] /= h.fixed.len() as f64;
+    for point in &points {
+        for c in 0..2 {
+            let rest_point = point.vertices.iter().zip(point.weights).map(|(i, weight)| rest[*i][c] * weight).sum::<f64>();
+            t[c] += point.position[c] - rest_point;
+        }
+    }
+    let handle_count = h.fixed.len() + points.len();
+    if handle_count > 0 {
+        t[0] /= handle_count as f64;
+        t[1] /= handle_count as f64;
+    }
+    if !t.iter().all(|v| v.is_finite()) {
+        return rest.to_vec();
     }
     let x0: Vec<[f64; 2]> = rest.iter().map(|p| [p[0] + t[0], p[1] + t[1]]).collect();
+    // A translated rest mesh already has zero deformation energy. Preserve that exact
+    // solution, especially with a single pin: the similarity system otherwise leaves rotation
+    // free and round-off can overwhelm its tiny regularizer (#313). Neutral Bend / Advanced
+    // edge targets also fit this pose; rotation or scale targets still require the full solve.
+    let close = |a: f64, b: f64| (a - b).abs() <= 16.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0);
+    let positions_fit = h.fixed.iter().all(|(i, p)| x0.get(*i).is_some_and(|q| close(q[0], p[0]) && close(q[1], p[1])));
+    let edges_fit = h.edges.iter().all(|e| rest.get(e.i).zip(rest.get(e.j)).is_some_and(|(a, b)| close(b[0] - a[0], e.vec[0]) && close(b[1] - a[1], e.vec[1])));
+    let points_fit = points.iter().all(|p| (0..2).all(|c| close(p.vertices.iter().zip(p.weights).map(|(i, w)| x0[*i][c] * w).sum(), p.position[c])));
+    if positions_fit && edges_fit && points_fit {
+        return x0;
+    }
     let mut fixed = vec![false; n];
     for (i, _) in &h.fixed {
         fixed[*i] = true;
@@ -231,7 +264,9 @@ pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handl
         x[2 * i + 1] = p[1];
     }
     let free2: Vec<bool> = (0..2 * n).map(|k| !fixed[k / 2]).collect();
-    solve(&a, &b, &mut x, &free2);
+    let points2: Vec<PointRow> =
+        points.iter().flat_map(|p| (0..2).map(move |c| (p.vertices.iter().zip(p.weights).map(|(i, w)| (2 * i + c, w)).collect(), p.position[c]))).collect();
+    constrained_solve(&a, &b, &mut x, &free2, &points2);
     let mut cur: Vec<[f64; 2]> = (0..n).map(|i| [x[2 * i], x[2 * i + 1]]).collect();
 
     // ---- Step 2: fit rigid triangles, then match edge vectors (x and y separately).
@@ -286,8 +321,10 @@ pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handl
             xs[*i] = p[0];
             ys[*i] = p[1];
         }
-        solve(&l, &bx, &mut xs, &free1);
-        solve(&l, &by, &mut ys, &free1);
+        let points1 =
+            |c: usize| points.iter().map(|p| (p.vertices.iter().zip(p.weights).map(|(i, w)| (*i, w)).collect(), p.position[c])).collect::<Vec<PointRow>>();
+        constrained_solve(&l, &bx, &mut xs, &free1, &points1(0));
+        constrained_solve(&l, &by, &mut ys, &free1, &points1(1));
         cur = (0..n).map(|i| [xs[i], ys[i]]).collect();
     }
     cur
@@ -324,4 +361,249 @@ pub fn fit_rigid(rest: [[f64; 2]; 3], cur: [[f64; 2]; 3]) -> [[f64; 2]; 3] {
         out[k] = [cc[0] + p[0] * c - p[1] * s, cc[1] + p[0] * s + p[1] * c];
     }
     out
+}
+
+/// Hard linear point constraint. The row uses original scalar indices.
+type PointRow = (Vec<(usize, f64)>, f64);
+
+fn valid_point(point: &PointTarget, vertices: usize) -> bool {
+    point.vertices.iter().all(|i| *i < vertices)
+        && point.position.iter().all(|v| v.is_finite())
+        && point.weights.iter().all(|v| v.is_finite() && *v >= 0.0)
+        && (point.weights.iter().sum::<f64>() - 1.0).abs() <= 1e-8
+}
+
+// Position attachments are capped at 32 pins; the similarity system has 64 scalar rows.
+fn constrained_solve(a: &Sparse, b: &[f64], x: &mut [f64], free: &[bool], points: &[PointRow]) {
+    if points.is_empty() {
+        return solve(a, b, x, free);
+    }
+    if x.len() != b.len() || free.len() != b.len() || a.rows.len() != b.len() {
+        return;
+    }
+    let idx: Vec<usize> = (0..b.len()).filter(|i| free[*i]).collect();
+    let m = idx.len();
+    if m == 0 {
+        return;
+    }
+    let mut pos = vec![usize::MAX; b.len()];
+    for (k, i) in idx.iter().enumerate() {
+        pos[*i] = k;
+    }
+    let mut ptr = vec![0];
+    let mut col = vec![];
+    let mut val = vec![];
+    let mut diag = vec![1.0; m];
+    let mut rhs = vec![0.0; m];
+    for (k, &i) in idx.iter().enumerate() {
+        let mut r = b[i];
+        for (&j, &v) in &a.rows[i] {
+            let Some(is_free) = free.get(j) else {
+                return;
+            };
+            if !v.is_finite() {
+                return;
+            }
+            if *is_free {
+                col.push(pos[j]);
+                val.push(v);
+                if j == i {
+                    diag[k] = v;
+                }
+            } else {
+                r -= v * x[j];
+            }
+        }
+        if !r.is_finite() || !diag[k].is_finite() || diag[k] <= 1e-300 {
+            return;
+        }
+        rhs[k] = r;
+        ptr.push(col.len());
+    }
+    let csr = Csr { ptr, col, val, diag };
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![];
+    let mut targets = vec![];
+    let mut lower: Vec<Vec<f64>> = vec![];
+    for (row, target) in points.iter().take(64) {
+        if !target.is_finite() || row.iter().any(|(i, w)| *i >= x.len() || !w.is_finite()) {
+            continue;
+        }
+        let mut q = *target;
+        let mut r = vec![];
+        for &(i, w) in row {
+            if free[i] {
+                r.push((pos[i], w));
+            } else {
+                q -= w * x[i];
+            }
+        }
+        if !q.is_finite() {
+            continue;
+        }
+        let dot = |other: &Vec<(usize, f64)>| r.iter().map(|(i, w)| w * other.iter().filter(|(j, _)| j == i).map(|(_, v)| *v).sum::<f64>()).sum::<f64>();
+        let mut l = vec![0.0; rows.len() + 1];
+        for j in 0..rows.len() {
+            let mut v = dot(&rows[j]);
+            for k in 0..j {
+                v -= l[k] * lower[j][k];
+            }
+            l[j] = v / lower[j][j];
+        }
+        let d = dot(&r) - l[..rows.len()].iter().map(|v| v * v).sum::<f64>();
+        if !d.is_finite() || d <= 1e-14 || !l.iter().all(|v| v.is_finite()) {
+            continue;
+        }
+        l[rows.len()] = d.sqrt();
+        rows.push(r);
+        targets.push(q);
+        lower.push(l);
+    }
+    if rows.is_empty() {
+        return solve(a, b, x, free);
+    }
+    // P = I − Cᵀ(CCᵀ)⁻¹C projects a search vector into the constraint nullspace.
+    // Project the initial guess onto Cx=target, then run PCG with projected residuals
+    // and search directions. This keeps each barycentric attachment hard throughout.
+    let gram_solve = |mut v: Vec<f64>| -> Option<Vec<f64>> {
+        for i in 0..v.len() {
+            for j in 0..i {
+                v[i] -= lower[i][j] * v[j];
+            }
+            v[i] /= lower[i][i];
+            if !v[i].is_finite() {
+                return None;
+            }
+        }
+        for i in (0..v.len()).rev() {
+            for j in i + 1..v.len() {
+                v[i] -= lower[j][i] * v[j];
+            }
+            v[i] /= lower[i][i];
+            if !v[i].is_finite() {
+                return None;
+            }
+        }
+        Some(v)
+    };
+    let project = |v: &mut [f64]| -> bool {
+        let residual: Vec<f64> = rows.iter().map(|r| r.iter().map(|(i, w)| w * v[*i]).sum()).collect();
+        let Some(u) = gram_solve(residual) else {
+            return false;
+        };
+        for (r, t) in rows.iter().zip(u) {
+            for &(i, w) in r {
+                v[i] -= w * t;
+            }
+        }
+        v.iter().all(|v| v.is_finite())
+    };
+    let mut xf: Vec<f64> = idx.iter().map(|i| x[*i]).collect();
+    let residual = rows.iter().zip(&targets).map(|(r, t)| *t - r.iter().map(|(i, w)| w * xf[*i]).sum::<f64>()).collect();
+    let Some(correction) = gram_solve(residual) else {
+        return;
+    };
+    for (r, t) in rows.iter().zip(correction) {
+        for &(i, w) in r {
+            xf[i] += w * t;
+        }
+    }
+    if !xf.iter().all(|v| v.is_finite()) {
+        return;
+    }
+    let mut ax = vec![0.0; m];
+    csr.mul(&xf, &mut ax);
+    let mut r: Vec<f64> = rhs.iter().zip(&ax).map(|(b, a)| b - a).collect();
+    if !project(&mut r) {
+        return;
+    }
+    let norm = |v: &[f64]| v.iter().fold(0.0_f64, |n, v| n.hypot(*v));
+    let bnorm = norm(&rhs).max(1e-30);
+    if !bnorm.is_finite() {
+        return;
+    }
+    let mut z: Vec<f64> = r.iter().zip(&csr.diag).map(|(r, d)| r / d).collect();
+    if !project(&mut z) {
+        return;
+    }
+    let mut p = z.clone();
+    let mut rz: f64 = r.iter().zip(&z).map(|(a, b)| a * b).sum();
+    let mut ap = vec![0.0; m];
+    for _ in 0..(4 * m + 50) {
+        if norm(&r) <= 1e-13 * bnorm || !rz.is_finite() || rz.abs() < 1e-300 {
+            break;
+        }
+        csr.mul(&p, &mut ap);
+        if !project(&mut ap) {
+            return;
+        }
+        let pap: f64 = p.iter().zip(&ap).map(|(a, b)| a * b).sum();
+        if !pap.is_finite() || pap <= 1e-300 {
+            break;
+        }
+        let alpha = rz / pap;
+        if !alpha.is_finite() {
+            break;
+        }
+        for k in 0..m {
+            xf[k] += alpha * p[k];
+            r[k] -= alpha * ap[k];
+        }
+        if !xf.iter().chain(&r).all(|v| v.is_finite()) {
+            return;
+        }
+        for k in 0..m {
+            z[k] = r[k] / csr.diag[k];
+        }
+        if !project(&mut z) {
+            return;
+        }
+        let rz2: f64 = r.iter().zip(&z).map(|(a, b)| a * b).sum();
+        if !rz2.is_finite() {
+            break;
+        }
+        let beta = rz2 / rz;
+        if !beta.is_finite() {
+            break;
+        }
+        rz = rz2;
+        for k in 0..m {
+            p[k] = z[k] + beta * p[k];
+        }
+        if !p.iter().all(|v| v.is_finite()) {
+            return;
+        }
+    }
+    for (k, i) in idx.iter().enumerate() {
+        x[*i] = xf[k];
+    }
+}
+
+/// Test rank without allocating a full mesh matrix. Fixed vertex constraints take priority.
+pub(crate) fn independent_point(fixed: &[usize], points: &[PointTarget], new: &PointTarget) -> bool {
+    if points.len() >= 32 {
+        return false;
+    }
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![];
+    let mut lower: Vec<Vec<f64>> = vec![];
+    for point in points.iter().chain(std::iter::once(new)) {
+        let row: Vec<(usize, f64)> =
+            point.vertices.iter().zip(point.weights).filter(|(i, w)| !fixed.contains(i) && w.abs() > 1e-15).map(|(i, w)| (*i, w)).collect();
+        let dot = |other: &Vec<(usize, f64)>| row.iter().map(|(i, w)| w * other.iter().filter(|(j, _)| j == i).map(|(_, v)| *v).sum::<f64>()).sum::<f64>();
+        let mut l = vec![0.0; rows.len() + 1];
+        for j in 0..rows.len() {
+            let mut v = dot(&rows[j]);
+            for k in 0..j {
+                v -= l[k] * lower[j][k];
+            }
+            l[j] = v / lower[j][j];
+        }
+        let d = dot(&row) - l[..rows.len()].iter().map(|v| v * v).sum::<f64>();
+        if !d.is_finite() || d <= 1e-14 {
+            return false;
+        }
+        l[rows.len()] = d.sqrt();
+        rows.push(row);
+        lower.push(l);
+    }
+    true
 }

@@ -1,5 +1,7 @@
 //! `engine.batch`: run several commands in one call, as one undo step, with later steps able to
-//! use what earlier ones returned (`"$1.layer"` is step 1's `layer` result). Agents build a
+//! use what earlier ones returned (`"$1.layer"` is step 1's `layer` result). A step with
+//! `substitute: false` keeps its params literal, including strings beginning with `$`.
+//! Agents build a
 //! layer, animate it and style it in one round trip; a failing step rolls everything back.
 
 use std::sync::Arc;
@@ -10,7 +12,32 @@ use super::{CommandSpec, always, bad, str_p};
 use crate::{EngineError, Result, Session};
 
 /// Commands that can't run inside a batch (they replace the project or nest batches).
-const NOT_IN_BATCH: &[&str] = &["engine.batch", "file.runScript", "script.run"];
+const NOT_IN_BATCH: &[&str] = &[
+    "engine.batch",
+    "file.runScript",
+    "script.run",
+    "file.newProject",
+    "file.openDemoProject",
+    "file.open",
+    "file.openRecent",
+    "file.revert",
+    "file.closeProject",
+];
+
+/// Saving commits a file and replaces the saved checkpoint. Explicit preference and shortcut
+/// commands update settings or configuration immediately; rollback cannot undo those side effects.
+const NOT_IN_ATOMIC_BATCH: &[&str] = &[
+    "file.save",
+    "file.saveAs",
+    "file.incrementAndSave",
+    "file.saveCopy",
+    "prefs.set",
+    "prefs.reset",
+    "shortcuts.set",
+    "shortcuts.reset",
+    "shortcuts.preset",
+    "shortcuts.import",
+];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
 fn reference(s: &str, results: &[Value]) -> Option<Result<Value>> {
@@ -55,7 +82,12 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let steps = p.get("steps").and_then(Value::as_array).ok_or_else(|| bad("engine.batch", "missing `steps`: [{command, params?}, …]"))?.clone();
     let label = str_p(p, "label").unwrap_or("Batch").to_string();
     let atomic = p.get("atomic").and_then(Value::as_bool).unwrap_or(true);
-    let (project, history, state) = (s.project.clone(), s.history.clone(), s.state.clone());
+    let (project, history, state, key_move) = (s.project.clone(), s.history.clone(), s.state.clone(), s.key_move.clone());
+    let (prefs, prefs_revision, defer_prefs_write) = (s.prefs.clone(), s.prefs_revision, s.defer_prefs_write);
+    let events = s.events.clone();
+    if atomic {
+        s.defer_prefs_write = true;
+    }
     let mut results: Vec<Value> = Vec::with_capacity(steps.len());
     for (i, step) in steps.iter().enumerate() {
         let run = |s: &mut Session, results: &[Value]| -> Result<Value> {
@@ -67,7 +99,19 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
             if NOT_IN_BATCH.contains(&id) {
                 return Err(bad("engine.batch", format!("`{id}` can't run inside a batch")));
             }
-            let params = substitute(step.get("params").unwrap_or(&json!({})), results)?;
+            if atomic && NOT_IN_ATOMIC_BATCH.contains(&id) {
+                let action = if id.starts_with("prefs.") {
+                    "change preferences"
+                } else if id.starts_with("shortcuts.") {
+                    "change shortcuts"
+                } else {
+                    "save"
+                };
+                return Err(bad("engine.batch", format!("{id} cannot run inside an atomic batch; {action} after the batch or pass atomic: false")));
+            }
+            let empty = json!({});
+            let raw = step.get("params").unwrap_or(&empty);
+            let params = if step.get("substitute").and_then(Value::as_bool) == Some(false) { raw.clone() } else { substitute(raw, results)? };
             s.execute_checked(id, params)
         };
         match run(s, &results) {
@@ -78,29 +122,42 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
                     s.project = project;
                     s.history = history;
                     s.state = state;
+                    s.key_move = key_move;
+                    s.prefs = prefs;
+                    s.prefs_revision = prefs_revision;
+                    s.defer_prefs_write = defer_prefs_write;
+                    // Failed steps cannot leave a dialog, quit or other frontend action queued.
+                    s.events = events;
                     s.sanitize_state();
                     s.bump();
                     "; the batch was rolled back (nothing changed)".to_string()
                 } else {
-                    fold(s, &project, &label);
+                    fold(s, &project, &history, &label);
                     format!("; steps 1–{i} were applied")
                 };
                 return Err(EngineError::Other(format!("step {} ({id}): {e}{note}", i + 1)));
             }
         }
     }
-    fold(s, &project, &label);
+    fold(s, &project, &history, &label);
+    if atomic {
+        s.defer_prefs_write = defer_prefs_write;
+        if s.prefs != prefs {
+            s.save_prefs();
+        }
+    }
     Ok(json!({"steps": results.len(), "results": results}))
 }
 
-/// Fold the undo steps recorded since the project was `snap` into one step called `label`.
-fn fold(s: &mut Session, snap: &Arc<effectcraft_project::Project>, label: &str) {
-    let h = &mut s.history;
-    let Some(start) = h.undo.iter().rposition(|(_, p)| Arc::ptr_eq(p, snap)) else { return };
-    let first = h.undo[start].1.clone();
-    h.undo.truncate(start);
-    h.undo.push((label.to_string(), first));
-    h.merge_key = None;
+/// Record the batch from the retained entry snapshot: individual steps may already have
+/// trimmed that snapshot out of their temporary undo line, or merged with an earlier gesture.
+fn fold(s: &mut Session, snap: &Arc<effectcraft_project::Project>, history: &crate::History, label: &str) {
+    if Arc::ptr_eq(&s.project, snap) {
+        return;
+    }
+    s.history = history.clone();
+    let levels = s.prefs.general.undo_levels.max(1) as usize;
+    s.history.record(label, snap.clone(), levels);
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -167,5 +224,107 @@ mod tests {
         // Bad references are reported.
         let e = s.execute_checked("engine.batch", json!({"steps": [{"command": "layer.rename", "params": {"layer": "$3.layer", "name": "x"}}]})).unwrap_err();
         assert!(e.to_string().contains("refers to step 3"), "{e}");
+    }
+
+    fn small_history_session() -> Session {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"width": 64, "height": 64, "duration": 10, "frameRate": 30})).unwrap();
+        s.execute("layer.newSolid", json!({"name": "Box", "color": "#ff0000"})).unwrap();
+        s.execute("prefs.set", json!({"key": "general.undoLevels", "value": 2})).unwrap();
+        s.history.clear();
+        s
+    }
+
+    fn three_keys() -> serde_json::Value {
+        json!([
+            {"command": "prop.addKey", "params": {"layer": "Box", "path": "transform/opacity", "time": 0, "value": 0}},
+            {"command": "prop.addKey", "params": {"layer": "Box", "path": "transform/opacity", "time": 1, "value": 50}},
+            {"command": "prop.addKey", "params": {"layer": "Box", "path": "transform/opacity", "time": 2, "value": 100}}
+        ])
+    }
+
+    #[test]
+    fn batch_larger_than_history_budget_keeps_entry_snapshot_and_one_redo() {
+        let mut s = small_history_session();
+        for width in [65, 66] {
+            s.execute("comp.settings", json!({"width": width})).unwrap();
+        }
+        let before = s.project.clone();
+        let previous = s.history.undo.last().unwrap().1.clone();
+        s.execute_checked("engine.batch", json!({"label": "Three keys", "steps": three_keys()})).unwrap();
+        let after = s.project.clone();
+        assert_eq!(s.history.undo.len(), 2, "the batch consumes one bounded history slot");
+        assert_eq!(s.history.undo.last().unwrap().0, "Three keys");
+        assert!(std::sync::Arc::ptr_eq(&s.history.undo.last().unwrap().1, &before));
+        assert!(s.undo());
+        assert!(std::sync::Arc::ptr_eq(&s.project, &before), "one undo removes every key");
+        assert!(s.undo());
+        assert!(std::sync::Arc::ptr_eq(&s.project, &previous), "the earlier edit survives intermediate trims");
+        assert!(s.redo() && s.redo());
+        assert!(std::sync::Arc::ptr_eq(&s.project, &after));
+    }
+
+    #[test]
+    fn batch_larger_than_history_budget_preserves_the_previous_redo_branch() {
+        let mut s = small_history_session();
+        s.execute("comp.settings", json!({"width": 65})).unwrap();
+        s.execute("comp.settings", json!({"width": 66})).unwrap();
+        let future = s.project.clone();
+        assert!(s.undo());
+        let before = s.project.clone();
+        s.execute_checked("engine.batch", json!({"steps": three_keys()})).unwrap();
+        assert!(s.history.redo.is_empty());
+        assert_eq!(s.history.branches.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(&s.history.branches[0].parent, &before));
+        assert!(std::sync::Arc::ptr_eq(&s.history.branches[0].steps[0].1, &future));
+        assert!(s.undo());
+        assert!(std::sync::Arc::ptr_eq(&s.project, &before));
+        let id = s.history_tree().iter().find(|n| !n.line).unwrap().id.clone();
+        assert!(s.goto_history(&id));
+        assert!(std::sync::Arc::ptr_eq(&s.project, &future));
+    }
+
+    #[test]
+    fn failed_batches_past_history_budget_restore_or_fold_the_complete_applied_prefix() {
+        for atomic in [true, false] {
+            let mut s = small_history_session();
+            let before = s.project.clone();
+            let mut steps = three_keys().as_array().unwrap().clone();
+            steps.push(json!({"command": "prop.set", "params": {"layer": "Box", "path": "missing", "value": 10}}));
+            let e = s.execute_checked("engine.batch", json!({"label": "Partial keys", "atomic": atomic, "steps": steps})).unwrap_err();
+            assert!(e.to_string().contains("step 4"));
+            if atomic {
+                assert!(std::sync::Arc::ptr_eq(&s.project, &before));
+                assert!(s.history.undo.is_empty());
+            } else {
+                assert_eq!(s.history.undo.len(), 1);
+                assert_eq!(s.history.undo[0].0, "Partial keys");
+                let after = s.project.clone();
+                assert!(s.undo());
+                assert!(std::sync::Arc::ptr_eq(&s.project, &before));
+                assert!(s.redo());
+                assert!(std::sync::Arc::ptr_eq(&s.project, &after));
+            }
+        }
+    }
+
+    #[test]
+    fn batch_does_not_merge_into_a_preceding_gesture_with_the_same_key() {
+        let mut s = small_history_session();
+        s.execute("prop.set", json!({"layer": "Box", "path": "transform/opacity", "value": 90, "merge": "drag"})).unwrap();
+        let before = s.project.clone();
+        s.execute_checked(
+            "engine.batch",
+            json!({"steps": [
+                {"command": "prop.set", "params": {"layer": "Box", "path": "transform/opacity", "value": 80, "merge": "drag"}}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(s.history.undo.len(), 2);
+        assert!(s.undo());
+        assert!(std::sync::Arc::ptr_eq(&s.project, &before));
+        assert!(s.undo());
+        let info = s.execute("prop.get", json!({"layer": "Box", "path": "transform/opacity"})).unwrap();
+        assert_eq!(info["value"], 100.0);
     }
 }

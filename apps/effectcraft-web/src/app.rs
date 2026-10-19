@@ -176,6 +176,11 @@ fn install_hooks(app: &mut EffectcraftApp) {
     }));
     // Saving downloads the file: the chosen name is all a "save dialog" needs.
     app.hooks.pick_save = Some(Box::new(|name: &str| Some(files::path_for(if name.is_empty() { "Untitled Project.ecproj" } else { name }))));
+    app.hooks.pick_save_file = Some(Box::new(|name: &str, ext: &str| {
+        let path = std::path::Path::new(name);
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Export");
+        Some(files::path_for(&std::path::Path::new(name).with_extension(ext).to_string_lossy()))
+    }));
     app.hooks.audio_device = Some(Box::new(audio::open));
     app.hooks.audio_devices = Some(Box::new(|| vec!["Browser default output".into()]));
 }

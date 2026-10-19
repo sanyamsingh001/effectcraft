@@ -30,7 +30,13 @@ Commands (CLI, MCP, control channel):
 ### Settings that change behaviour
 
 - `general.language`: interface language (`system` / `en` / `ja` / `zh-hans` / `zh-hant`), Settings ▸ General ▸ Language; menu labels change immediately. `system` (Match System, the default) follows the operating system's interface language where EffectCraft has a translation and is English otherwise: a Simplified Chinese locale (`zh`, `zh-CN`, `zh_CN.UTF-8`, `zh-Hans-CN`, `zh-SG`) selects `zh-hans`, a Traditional one (`zh-TW`, `zh-HK`, `zh-Hant`, `zh_MO`) selects `zh-hant`; the browser build stays in English with it. Native Japanese, Simplified and Traditional Chinese UI uses installed system fonts; the web host must supply a Japanese font.
-- `general.undoLevels`: Levels of Undo
+- `general.undoLevels`: Levels of Undo (1–1000, default 32). History keeps at most this many
+  undo states and this many redo states nearest the current project; lowering the setting
+  removes older undo states and distant redo states. Alternative history branches have a
+  separate snapshot-count limit; branches attached to removed states are discarded first.
+  History shares unchanged composition data between project snapshots and has no byte-based
+  memory budget, so higher levels can retain more memory
+  when large compositions change.
 - `general.pathPointSize`: Path Point and Handle Size
 - `general.recentItems`: Recent Projects Shown
 - `general.showToolTips`: Show Tool Tips
@@ -56,6 +62,7 @@ Commands (CLI, MCP, control channel):
 - `previews.fastPreviews`: Fast Previews (Draft 3D, Faster Effects)
 - `appearance.theme`: Theme
 - `appearance.brightness`: Brightness
+- `appearance.uiScale`: UI Scale (0.75×–2×, default 1×), applies to the whole interface and its dialogs; saved with the other preferences
 - `appearance.useLabelColorForHandles`: Use Label Color for Layer Handles and Paths
 - `grids.gridColor`: Color
 - `grids.gridSpacing`: Gridline Every
@@ -161,6 +168,13 @@ step with the schema.
   drawn by the GPU (egui on wgpu).
 - `scripting.enableJsDebugger`: the JavaScript engine has no step debugger; script errors report
   their file and line in the Script Console.
+
+## Workspaces
+
+Window ▸ Workspace stores named layouts in `workspaces.json` through the same configuration
+store as preferences. Save, Save As, Rename and Delete write immediately, including floating
+panels and saved changes to the Default workspace. A fresh session starts with Default; choose
+a saved name from the workspace menu to restore it.
 
 ## Keyboard shortcuts
 

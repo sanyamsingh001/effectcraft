@@ -257,7 +257,7 @@ fn new_path(s: &mut Session, p: &Value) -> Result<Value> {
         path.vertices.iter().fold(([f64::MAX; 2], [f64::MIN; 2]), |(lo, hi), v| ([lo[0].min(v[0]), lo[1].min(v[1])], [hi[0].max(v[0]), hi[1].max(v[1])]));
     let bounds = [lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]];
     let name = str_p(p, "name").map(str::to_string);
-    let (lid, group, path_uid) = s.edit("Pen Tool", None, |proj, st| {
+    let (lid, group, path_uid) = s.edit("Pen Tool", merge_p(p), |proj, st| {
         let lid = match target {
             Some(l) => l,
             None => super::shape_tool::new_shape_layer(proj, st, &comp, cid, name.as_deref(), None)?,

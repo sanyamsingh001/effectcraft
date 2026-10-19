@@ -618,3 +618,255 @@ fn toggle_transform_key_covers_selected_layers_separated_position_and_3d_rotatio
     }
     assert!(s.execute("keys.toggleTransform", json!({"prop": "skew"})).is_err());
 }
+
+/// Deleting remap keys, then deleting their empty property row, disables remapping without
+/// deleting the footage/precomp layer; a selected individual key keeps the key-only behavior.
+#[test]
+fn clearing_an_empty_time_remap_removes_the_property_and_keeps_the_layer() {
+    let (mut s, l) = precomp_setup();
+    s.execute("layer.enableTimeRemap", json!({})).unwrap();
+    s.execute("prop.select", json!({"layer": l, "path": "timeRemap"})).unwrap();
+    s.execute("edit.clear", json!({})).unwrap();
+    assert!(prop(&s, l, "timeRemap").keys.is_empty());
+    let before = s.history.undo.len();
+    s.execute("edit.clear", json!({})).unwrap();
+    assert_eq!(s.history.undo.len(), before + 1);
+    assert_eq!(s.active_comp().unwrap().layers.len(), 1);
+    assert!(s.active_comp().unwrap().layers[0].props.get("timeRemap").is_none());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.active_comp().unwrap().layers[0].props.get("timeRemap").is_some());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "timeRemap").keys.len(), 2);
+    s.execute("keys.select", json!({"keys":[{"layer":l,"path":"timeRemap","time":0.0}], "selectProperties":true})).unwrap();
+    s.execute("edit.clear", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "timeRemap").keys.len(), 1);
+    assert_eq!(s.active_comp().unwrap().layers.len(), 1);
+
+    // Explicit layer deletion remains explicit even while the property is selected.
+    s.execute("edit.clear", json!({"layers":[l]})).unwrap();
+    assert!(s.active_comp().unwrap().layers.is_empty());
+}
+
+#[test]
+fn clearing_time_remaps_keeps_locked_properties() {
+    let (mut s, a) = precomp_setup();
+    let b = s.execute("layer.addItem", json!({"item":"Inner"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.enableTimeRemap", json!({"layers":[a,b], "value":true})).unwrap();
+    s.execute("prop.select", json!({"layer":a,"path":"timeRemap", "selectKeys":false})).unwrap();
+    s.execute("prop.select", json!({"layer":b,"path":"timeRemap", "selectKeys":false, "add":true})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers":[b], "switch":"locked", "value":true})).unwrap();
+    s.execute("edit.clear", json!({})).unwrap();
+    let comp = s.active_comp().unwrap();
+    assert!(comp.layer(effectcraft_project::LayerId(a)).unwrap().props.get("timeRemap").is_none());
+    assert!(comp.layer(effectcraft_project::LayerId(b)).unwrap().props.get("timeRemap").is_some());
+    assert_eq!(comp.layers.len(), 2);
+    assert_eq!(s.state.selected_props.len(), 1);
+}
+
+#[test]
+fn pick_whip_inserts_at_character_ranges_without_replacing_the_draft() {
+    let (mut s, l) = setup();
+    s.execute("prop.setExpression", json!({"layer":l,"path":"transform/rotation","expression":"value"})).unwrap();
+    let before = s.history.undo.len();
+    let result = s
+        .execute(
+            "prop.pickWhip",
+            json!({
+                "layer":l, "path":"transform/rotation", "target":{"layer":l,"path":"transform/opacity"},
+                "insert":{"expression":"/* π */ 2 + VALUE + 3", "start":12, "end":17}
+            }),
+        )
+        .unwrap();
+    let text = result.as_str().unwrap();
+    assert!(text.starts_with("/* π */ 2 + "), "{text}");
+    assert!(text.ends_with(" + 3"), "{text}");
+    assert!(text.contains("opacity"), "{text}");
+    assert!(!text.contains("VALUE"));
+    assert_eq!(s.history.undo.len(), before + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "transform/rotation").expr.unwrap().text, "value");
+    let before = s.history.undo.len();
+    for range in [(20, 2), (0, 999)] {
+        assert!(
+            s.execute(
+                "prop.pickWhip",
+                json!({
+                    "layer":l,"path":"transform/rotation","target":{"layer":l,"path":"transform/opacity"},
+                    "insert":{"expression":"π + value", "start":range.0,"end":range.1}
+                })
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(s.history.undo.len(), before);
+    assert_eq!(prop(&s, l, "transform/rotation").expr.unwrap().text, "value");
+    let result = s.execute("prop.pickWhip", json!({"layer":l,"path":"transform/rotation","target":{"layer":l,"path":"transform/opacity"}})).unwrap();
+    assert!(!result.as_str().unwrap().contains("value"), "without an active edit, pick whip replaces the expression");
+}
+
+#[test]
+fn graph_handle_batch_updates_dimensions_atomically_and_keeps_locked_layers() {
+    let (mut s, l) = setup();
+    animate(&mut s, l, "transform/scale", &[(0.0, json!([0, 0, 0])), (1.0, json!([100, 200, 0]))]);
+    let l2 = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    animate(&mut s, l2, "transform/opacity", &[(0.0, json!(0)), (1.0, json!(100))]);
+    let cid = s.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l2)).unwrap().switches.locked = true;
+    let uid = prop(&s, l, "transform/scale").uid;
+    let locked = prop(&s, l2, "transform/opacity");
+    let before = prop(&s, l, "transform/scale");
+    let history = s.history.undo.len();
+    let targets = json!({"keys": [
+        {"layer": l, "prop": uid, "time": 0, "side": "out", "dim": 1, "speed": 40, "influence": 60},
+        {"layer": l, "prop": uid, "time": 1, "side": "in", "dim": 1, "speed": 40, "influence": 60},
+        {"layer": l2, "prop": locked.uid, "time": 0, "side": "out", "speed": 40, "influence": 60}
+    ]});
+    s.execute("keys.setEase", targets.clone()).unwrap();
+    let after = prop(&s, l, "transform/scale");
+    assert_eq!(s.history.undo.len(), history + 1, "all handles share an undo entry");
+    for ease in [&after.keys[0].out_ease, &after.keys[1].in_ease] {
+        assert_eq!(ease[1].speed, 40.0);
+        assert_eq!(ease[1].influence, 0.6);
+        assert_ne!(ease[0].speed, 40.0, "untouched dimension keeps its slope");
+    }
+    assert_eq!(prop(&s, l2, "transform/opacity"), locked);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "transform/scale"), before);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "transform/scale"), after);
+    let mut invalid = targets;
+    invalid["keys"][1]["prop"] = json!(u64::MAX);
+    assert!(s.execute("keys.setEase", invalid).is_err());
+    assert_eq!(prop(&s, l, "transform/scale"), after, "a failing target rolls back the complete batch");
+}
+
+#[test]
+fn key_stagger_uses_selection_order_and_recovers_collisions_during_a_gesture() {
+    let (mut s, l) = setup();
+    animate(&mut s, l, "transform/opacity", &[(0.0, json!(0)), (1.0, json!(100)), (2.0, json!(50))]);
+    let uid = prop(&s, l, "transform/opacity").uid;
+    s.execute(
+        "keys.select",
+        json!({"keys": [
+            {"layer": l, "prop": uid, "time": 2},
+            {"layer": l, "prop": uid, "time": 0},
+            {"layer": l, "prop": uid, "time": 1}
+        ]}),
+    )
+    .unwrap();
+    let before = prop(&s, l, "transform/opacity");
+    let history = s.history.undo.len();
+    s.execute("keys.transform", json!({"stagger": -0.5, "merge": "stagger-test", "fromStart": true})).unwrap();
+    assert_eq!(prop(&s, l, "transform/opacity").keys.len(), 2, "two keys can temporarily share frame zero");
+    s.execute("keys.transform", json!({"stagger": 0.3, "merge": "stagger-test", "fromStart": true})).unwrap();
+    let after = prop(&s, l, "transform/opacity");
+    assert_eq!(after.keys.iter().map(|k| (k.time.seconds() * 30.0).round() as i64).collect::<Vec<_>>(), [9, 48, 60]);
+    assert_eq!(after.keys.iter().map(|k| k.value.as_f64()).collect::<Vec<_>>(), [0.0, 100.0, 50.0]);
+    assert_eq!(s.state.selected_keys.iter().map(|k| (k.time.seconds() * 30.0).round() as i64).collect::<Vec<_>>(), [60, 9, 48]);
+    assert_eq!(s.history.undo.len(), history + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "transform/opacity"), before);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "transform/opacity"), after);
+}
+
+#[test]
+fn layer_stagger_uses_selection_order_and_keeps_locked_layers() {
+    let (mut s, l) = setup();
+    let l2 = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    let l3 = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [l2, l, l3]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().switches.locked = true;
+    let history = s.history.undo.len();
+    for interval in [0.1, 0.2] {
+        s.execute("layer.timing", json!({"stagger": interval, "merge": "layer-stagger-test"})).unwrap();
+    }
+    let times = |s: &Session| {
+        [l2, l, l3].map(|id| (s.active_comp().unwrap().layer(effectcraft_project::LayerId(id)).unwrap().start_time.seconds() * 30.0).round() as i64)
+    };
+    assert_eq!(times(&s), [0, 0, 18]);
+    assert_eq!(s.history.undo.len(), history + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(times(&s), [0, 0, 0]);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(times(&s), [0, 0, 18]);
+    assert!(s.execute("layer.timing", json!({"stagger": 1e18})).is_err(), "an overflowing interval is rejected");
+    assert_eq!(times(&s), [0, 0, 18]);
+}
+
+#[test]
+fn direct_endpoint_edit_tracks_all_selected_roving_keys_in_selection_order() {
+    let (mut s, l) = setup();
+    animate(&mut s, l, "transform/position", &[(0.0, json!([0, 0])), (1.0, json!([100, 0])), (2.0, json!([200, 0]))]);
+    animate(&mut s, l, "transform/opacity", &[(0.5, json!(50))]);
+    s.execute("keys.select", json!({"keys": [{"layer": l, "path": "transform/position", "time": 1}]})).unwrap();
+    s.execute("keys.interpolation", json!({"roving": true})).unwrap();
+    s.execute(
+        "keys.select",
+        json!({"keys": [
+            {"layer": l, "path": "transform/position", "time": 2},
+            {"layer": l, "path": "transform/opacity", "time": 0.5},
+            {"layer": l, "path": "transform/position", "time": 1},
+            {"layer": l, "path": "transform/position", "time": 0}
+        ]}),
+    )
+    .unwrap();
+    let before = s.state.selected_keys.clone();
+    let info = s.execute("keys.set", json!({"layer": l, "path": "transform/position", "time": 2, "newTime": 4})).unwrap();
+    assert_eq!(info["layerTime"], 4.0);
+    let position = prop(&s, l, "transform/position");
+    assert_eq!(s.state.selected_keys.len(), 4);
+    assert_eq!(s.state.selected_keys[0].time, position.keys[2].time);
+    assert_eq!(s.state.selected_keys[1], before[1], "unrelated selection stays in the same position");
+    assert_eq!(s.state.selected_keys[2].time, position.keys[1].time);
+    assert_eq!(s.state.selected_keys[3], before[3]);
+    assert_eq!(s.state.selected_keys[2].time.seconds(), 2.0);
+    assert_eq!(s.execute("keys.toggleHold", json!({})).unwrap(), json!(4), "each selected key is edited once");
+}
+
+#[test]
+fn direct_value_edit_tracks_roving_key_and_deduplicates_colliding_refs() {
+    let (mut s, l) = setup();
+    animate(&mut s, l, "transform/position", &[(0.0, json!([0, 0])), (1.0, json!([100, 0])), (2.0, json!([200, 0]))]);
+    s.execute("keys.select", json!({"keys": [{"layer": l, "path": "transform/position", "time": 1}]})).unwrap();
+    s.execute("keys.interpolation", json!({"roving": true, "spatial": "linear"})).unwrap();
+    s.execute(
+        "keys.select",
+        json!({"keys": [
+            {"layer": l, "path": "transform/position", "time": 1},
+            {"layer": l, "path": "transform/position", "time": 0}
+        ]}),
+    )
+    .unwrap();
+    s.execute("keys.set", json!({"layer": l, "path": "transform/position", "time": 1, "value": [0, 0]})).unwrap();
+    let p = prop(&s, l, "transform/position");
+    assert_eq!(p.keys[1].time, p.keys[0].time, "zero-length spatial segment produces a stored-time collision");
+    assert_eq!(s.state.selected_keys.len(), 1, "colliding refs retain only their first position");
+    assert_eq!(s.state.selected_keys[0].time, p.keys[1].time);
+    assert_eq!(s.execute("keys.toggleHold", json!({})).unwrap(), json!(1));
+}
+
+#[test]
+fn direct_roving_edit_drops_stale_target_refs_without_moving_unrelated_selection() {
+    let (mut s, l) = setup();
+    animate(&mut s, l, "transform/position", &[(0.0, json!([0, 0])), (1.0, json!([100, 0])), (2.0, json!([200, 0]))]);
+    animate(&mut s, l, "transform/opacity", &[(0.5, json!(50))]);
+    s.execute("keys.select", json!({"keys": [{"layer": l, "path": "transform/position", "time": 1}]})).unwrap();
+    s.execute("keys.interpolation", json!({"roving": true})).unwrap();
+    s.execute(
+        "keys.select",
+        json!({"keys": [
+            {"layer": l, "path": "transform/opacity", "time": 0.5},
+            {"layer": l, "path": "transform/position", "time": 1}
+        ]}),
+    )
+    .unwrap();
+    let unrelated = s.state.selected_keys[0];
+    let stale = crate::KeyRef { time: effectcraft_time::Tick::from_seconds_f64(0.75), ..s.state.selected_keys[1] };
+    s.state.selected_keys.insert(1, stale);
+    s.execute("keys.set", json!({"layer": l, "path": "transform/position", "time": 2, "newTime": 4})).unwrap();
+    assert_eq!(s.state.selected_keys.len(), 2);
+    assert_eq!(s.state.selected_keys[0], unrelated);
+    assert_eq!(s.state.selected_keys[1].time, prop(&s, l, "transform/position").keys[1].time);
+}
