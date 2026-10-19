@@ -272,7 +272,13 @@ File.prototype = {
   copy: function (to) { return JSON.parse(__file("copy", this.__path, __str(to))); },
   rename: function (newName) {
     if (this.__mode !== null) throw __err("File.rename for open files is not supported");
-    return JSON.parse(__file("rename", this.__path, __str(newName)));
+    var path = this.__path, name = __str(newName);
+    var renamed = JSON.parse(__file("rename", path, name));
+    if (renamed === true) {
+      var slash = path.lastIndexOf("/");
+      this.__path = slash < 0 ? name : path.substring(0, slash + 1) + name;
+    }
+    return renamed;
   },
   execute: function () { return JSON.parse(__file("execute", this.__path)); },
   openDlg: function () { return null; },

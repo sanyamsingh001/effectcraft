@@ -1505,7 +1505,11 @@ fn file_rename_changes_a_closed_file_basename() {
     s.path = Some(dir.join("project.ecproj").to_string_lossy().to_string());
     s.prefs.scripting.allow_scripts_write_files = true;
     let source_json = serde_json::to_string(&source.to_string_lossy()).unwrap();
-    let outcome = run_code(&mut s, &format!("new File({source_json}).rename('renamed.bin')"), "file-rename.jsx");
+    let outcome = run_code(
+        &mut s,
+        &format!("var file = new File({source_json}); var renamed = file.rename('renamed.bin'); [renamed, file.name, file.exists]"),
+        "file-rename.jsx",
+    );
     let destination_bytes = std::fs::read(&destination);
     let source_exists = source.try_exists();
     let sentinel_a_bytes = std::fs::read(&sentinel_a);
@@ -1513,12 +1517,13 @@ fn file_rename_changes_a_closed_file_basename() {
     let cleanup = std::fs::remove_dir_all(&dir);
 
     assert!(outcome.error.is_none(), "script failed: {:?}\noutput: {:?}", outcome.error, outcome.output);
-    assert_eq!(outcome.result, json!(true));
+    assert_eq!(outcome.result.get(0), Some(&json!(true)));
     assert_eq!(destination_bytes.unwrap(), original);
     assert!(!source_exists.unwrap(), "the old basename must no longer exist");
     assert_eq!(sentinel_a_bytes.unwrap(), original_a);
     assert_eq!(sentinel_b_bytes.unwrap(), original_b);
     cleanup.unwrap();
+    assert_eq!(outcome.result, json!([true, "renamed.bin", true]));
 }
 
 #[cfg(target_os = "linux")]
